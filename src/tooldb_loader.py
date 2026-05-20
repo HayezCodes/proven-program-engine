@@ -6,9 +6,14 @@ S/F data is never marked usable (sf_usable=False) because TlWorkMaterial
 is absent in all known libraries — no material context exists to validate
 speeds and feeds against a specific workpiece material.
 
+Two extraction paths:
+  assembly_join  — TlAssembly → TlAssemblyItem → TlTool → TlToolMill/TlToolLathe
+  lathe_fallback — TlTool → TlToolLathe for tools not linked through TlAssembly
+
 READ ONLY. Never modifies .tooldb files.
 """
 
+import json
 import re
 import sqlite3
 from datetime import datetime
@@ -28,6 +33,7 @@ _COLUMN_ORDER = [
     "insert_shape", "insert_ic_diameter", "insert_corner_radius",
     "feed_rate_ipm", "spindle_rpm",
     "is_metric", "sf_usable", "sf_reject_reason",
+    "extraction_method", "confidence", "needs_review", "raw_json",
 ]
 
 _MILL_SQL = """
@@ -83,6 +89,30 @@ _UNKNOWN_SQL = """
     LEFT JOIN TlAssemblyItem ai_h ON a.MainHolder = ai_h.ID
     WHERE m.ID IS NULL AND l.ID IS NULL
 """
+
+_LATHE_FALLBACK_SQL = """
+    SELECT
+        t.ToolNumber                            AS tool_number,
+        t.ToolStation                           AS tool_station,
+        COALESCE(ai.Name, '')                   AS tool_name,
+        COALESCE(ins.AnsiShapeCode, '')         AS ansi_code,
+        COALESCE(ins.ICDiameter,   0.0)         AS ic_diameter,
+        COALESCE(ins.CornerRadius, 0.0)         AS corner_radius
+    FROM TlTool t
+    JOIN TlToolLathe     l    ON l.ID          = t.ID
+    LEFT JOIN TlAssemblyItem ai ON ai.ID       = t.ID
+    LEFT JOIN TlInsert   ins  ON ins.ID        = l.InsertID
+    WHERE NOT EXISTS (
+        SELECT 1 FROM TlAssembly a WHERE a.MainTool = t.ID
+    )
+"""
+
+_SUMMARY_ZERO = {
+    "assembled_mill_records": 0,
+    "assembled_lathe_records": 0,
+    "fallback_lathe_records": 0,
+    "skipped_no_tool_number": 0,
+}
 
 
 def _extract_machine_ids(path: Path) -> list[str]:
@@ -141,6 +171,10 @@ def _query_mill(con: sqlite3.Connection, sf_usable: bool, sf_reject: str) -> lis
             "spindle_rpm": rpm,
             "sf_usable": sf_usable,
             "sf_reject_reason": sf_reject,
+            "extraction_method": "assembly_join",
+            "confidence": "HIGH",
+            "needs_review": False,
+            "raw_json": "",
         })
     return results
 
@@ -169,6 +203,10 @@ def _query_lathe(con: sqlite3.Connection) -> list[dict]:
             "spindle_rpm": None,
             "sf_usable": False,
             "sf_reject_reason": "no_sf_data",
+            "extraction_method": "assembly_join",
+            "confidence": "HIGH",
+            "needs_review": False,
+            "raw_json": "",
         })
     return results
 
@@ -194,40 +232,73 @@ def _query_unknown(con: sqlite3.Connection) -> list[dict]:
             "spindle_rpm": None,
             "sf_usable": False,
             "sf_reject_reason": "no_sf_data",
+            "extraction_method": "assembly_join",
+            "confidence": "HIGH",
+            "needs_review": False,
+            "raw_json": "",
         })
     return results
 
 
-def load_tooldb(path: Path) -> pd.DataFrame:
+def _query_lathe_fallback(con: sqlite3.Connection) -> tuple[list[dict], int]:
+    """Extract lathe tools that have no TlAssembly record.
+
+    Returns (records, skipped_count) where skipped_count is the number of
+    lathe tools skipped because ToolNumber == 0 (unassigned).
     """
-    Load one .tooldb/.TOOLDB file. Returns a DataFrame with one row per
-    (machine_id, tool_assembly). Returns empty DataFrame on any error.
-
-    READ ONLY — never writes to the source file.
-    """
-    if not path.exists():
-        return pd.DataFrame()
-
-    machine_ids = _extract_machine_ids(path)
-
     try:
-        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-        has_mat = _has_material(con)
-        sf_reject = "" if has_mat else "missing_material"
-        sf_usable = has_mat  # always False in practice (TlWorkMaterial is empty)
-
-        records: list[dict] = []
-        records.extend(_query_mill(con, sf_usable, sf_reject))
-        records.extend(_query_lathe(con))
-        records.extend(_query_unknown(con))
-        con.close()
+        rows = con.execute(_LATHE_FALLBACK_SQL).fetchall()
     except Exception:
-        return pd.DataFrame()
+        return [], 0
 
-    if not records:
-        return pd.DataFrame()
+    results = []
+    skipped = 0
+    for r in rows:
+        tool_num = r[0]
+        if tool_num == 0:
+            skipped += 1
+            continue
 
-    source_stem = path.stem
+        ansi_code = str(r[3]) if r[3] else ""
+        shape = _ansi_code_to_shape(ansi_code) if ansi_code else None
+        ic_dia = r[4] if r[4] else None
+        cr = r[5] if r[5] else None
+
+        raw = json.dumps({
+            "tool_number_raw": tool_num,
+            "tool_station_raw": r[1],
+            "ansi_code_raw": ansi_code,
+            "ic_diameter_raw": r[4],
+            "source_table": "TlToolLathe",
+        })
+
+        results.append({
+            "tool_number": tool_num,
+            "is_metric": False,
+            "tool_station": r[1],
+            "tool_name": _clean(r[2]),
+            "holder_name": "",
+            "tool_category": "lathe",
+            "overall_diameter": None,
+            "flute_count": None,
+            "mc_tool_type": None,
+            "insert_shape": shape,
+            "insert_ic_diameter": ic_dia,
+            "insert_corner_radius": cr,
+            "feed_rate_ipm": None,
+            "spindle_rpm": None,
+            "sf_usable": False,
+            "sf_reject_reason": "no_sf_data",
+            "extraction_method": "lathe_fallback",
+            "confidence": "MEDIUM",
+            "needs_review": True,
+            "raw_json": raw,
+        })
+    return results, skipped
+
+
+def _build_df(records: list[dict], machine_ids: list[str], source_stem: str) -> pd.DataFrame:
+    """Expand records by machine_ids, set source_tooldb, enforce column order."""
     for rec in records:
         rec["source_tooldb"] = source_stem
 
@@ -248,33 +319,108 @@ def load_tooldb(path: Path) -> pd.DataFrame:
 
     df = df[_COLUMN_ORDER]
 
-    # Ensure bool columns hold Python bools (not numpy.bool_) for identity comparisons
-    for bool_col in ("sf_usable", "is_metric"):
+    for bool_col in ("sf_usable", "is_metric", "needs_review"):
         df[bool_col] = df[bool_col].astype(object)
 
+    return df
+
+
+def load_tooldb(path: Path) -> pd.DataFrame:
+    """
+    Load one .tooldb/.TOOLDB file. Returns a DataFrame with one row per
+    (machine_id, tool_assembly). Falls back to direct TlToolLathe extraction
+    for lathe tools not linked through TlAssembly.
+
+    df.attrs contains summary counts (pre-expansion):
+      assembled_mill_records, assembled_lathe_records,
+      fallback_lathe_records, skipped_no_tool_number
+
+    READ ONLY — never writes to the source file.
+    """
+    empty = pd.DataFrame()
+    empty.attrs.update(_SUMMARY_ZERO)
+
+    if not path.exists():
+        return empty
+
+    machine_ids = _extract_machine_ids(path)
+
+    try:
+        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        has_mat = _has_material(con)
+        sf_reject = "" if has_mat else "missing_material"
+        sf_usable = has_mat
+
+        mill_recs = _query_mill(con, sf_usable, sf_reject)
+        lathe_recs = _query_lathe(con)
+        unknown_recs = _query_unknown(con)
+        fallback_recs, skipped = _query_lathe_fallback(con)
+        con.close()
+    except Exception:
+        return empty
+
+    summary = {
+        "assembled_mill_records": len(mill_recs),
+        "assembled_lathe_records": len(lathe_recs),
+        "fallback_lathe_records": len(fallback_recs),
+        "skipped_no_tool_number": skipped,
+    }
+
+    records = mill_recs + lathe_recs + unknown_recs + fallback_recs
+
+    if not records:
+        empty.attrs.update(summary)
+        return empty
+
+    df = _build_df(records, machine_ids, path.stem)
+    df.attrs.update(summary)
     return df
 
 
 def load_all_tooldb(library_dir: Path) -> pd.DataFrame:
     """
     Scan library_dir for all active .tooldb/.TOOLDB files and load them.
-    Returns a combined DataFrame. Returns empty DataFrame if none found.
+    Returns a combined DataFrame. df.attrs holds aggregated summary counts.
+    Returns empty DataFrame if none found.
     """
+    empty = pd.DataFrame()
+    empty.attrs.update(_SUMMARY_ZERO)
+
     if not library_dir.exists():
-        return pd.DataFrame()
+        return empty
 
     paths = sorted(
         p for p in library_dir.iterdir()
         if p.is_file() and _is_active_tooldb(p)
     )
 
-    frames = [load_tooldb(p) for p in paths]
-    frames = [f for f in frames if not f.empty]
+    total_summary = dict(_SUMMARY_ZERO)
+    frames = []
+
+    for p in paths:
+        f = load_tooldb(p)
+        for key in total_summary:
+            total_summary[key] += f.attrs.get(key, 0)
+        if not f.empty:
+            frames.append(f)
 
     if not frames:
-        return pd.DataFrame()
+        empty.attrs.update(total_summary)
+        return empty
 
-    return pd.concat(frames, ignore_index=True)
+    result = pd.concat(frames, ignore_index=True)
+    result.attrs.update(total_summary)
+    return result
+
+
+def summarize_tooldb(df: pd.DataFrame) -> dict:
+    """Return summary counts from a df produced by load_tooldb or load_all_tooldb."""
+    return {
+        "assembled_mill_records": df.attrs.get("assembled_mill_records", 0),
+        "assembled_lathe_records": df.attrs.get("assembled_lathe_records", 0),
+        "fallback_lathe_records": df.attrs.get("fallback_lathe_records", 0),
+        "skipped_no_tool_number": df.attrs.get("skipped_no_tool_number", 0),
+    }
 
 
 def export_tooldb_reference(
