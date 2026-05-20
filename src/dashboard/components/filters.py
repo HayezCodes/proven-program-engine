@@ -79,6 +79,23 @@ def feed_intent_filter(df: pd.DataFrame, key: str = "filter_intent") -> pd.DataF
     return filter_df(df, feed_intent_candidate=selected) if selected else df
 
 
+def tool_source_filter(df: pd.DataFrame, key: str = "filter_tool_src") -> pd.DataFrame:
+    """Sidebar filter by resolved_tool_source."""
+    sources = safe_list(df, "resolved_tool_source")
+    selected = _sidebar_multiselect("Tool Identity Source", sources, key)
+    return filter_df(df, resolved_tool_source=selected) if selected else df
+
+
+def needs_review_filter(df: pd.DataFrame, key: str = "filter_needs_review") -> pd.DataFrame:
+    """Sidebar checkbox to show only rows that need tool identity review."""
+    if "resolved_tool_needs_review" not in df.columns:
+        return df
+    show_only = st.sidebar.checkbox("Needs review only", key=key)
+    if show_only:
+        return df[df["resolved_tool_needs_review"].astype(bool)]
+    return df
+
+
 def sidebar_text_search(
     df: pd.DataFrame,
     columns: list[str],

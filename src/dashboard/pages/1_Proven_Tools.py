@@ -19,11 +19,15 @@ from src.dashboard.styling.theme import apply_theme
 from src.dashboard.data_access.loader import (
     load_latest_material_candidates,
     load_latest_tooling_review,
+    load_latest_tooldb_reference,
     build_proven_tools_df,
 )
+from src.dashboard.data_access.overrides import load_tooling_overrides
+from src.dashboard.data_access.tool_identity import resolve_tool_identity_df
 from src.dashboard.components.filters import (
     machine_filter, tool_filter, smode_filter,
     confidence_filter, material_candidate_filter, feed_intent_filter,
+    tool_source_filter, needs_review_filter,
     sidebar_text_search,
 )
 from src.dashboard.components.tables import show_table, download_csv, row_count_caption
@@ -41,7 +45,11 @@ st.caption("Proven S/F ranges extracted from real CNC programs — suggestions o
 def _load():
     mc = load_latest_material_candidates()
     tr = load_latest_tooling_review()
-    return build_proven_tools_df(mc, tr), mc, tr
+    tooldb = load_latest_tooldb_reference()
+    overrides = load_tooling_overrides()
+    base = build_proven_tools_df(mc, tr)
+    enriched = resolve_tool_identity_df(base, tooldb_ref=tooldb, overrides=overrides)
+    return enriched, mc, tr
 
 df, mc_raw, tr_raw = _load()
 
@@ -56,8 +64,11 @@ df = smode_filter(df, key="pt_smode")
 df = confidence_filter(df, key="pt_conf")
 df = material_candidate_filter(df, key="pt_mat")
 df = feed_intent_filter(df, key="pt_intent")
+df = tool_source_filter(df, key="pt_tool_src")
+df = needs_review_filter(df, key="pt_needs_review")
 df = sidebar_text_search(
-    df, ["active_t_code", "tool_number", "material_candidate_1"], label="Search", key="pt_search"
+    df, ["active_t_code", "tool_number", "resolved_tool_name", "material_candidate_1"],
+    label="Search", key="pt_search",
 )
 
 # ── Metrics ───────────────────────────────────────────────────────────────────
@@ -86,7 +97,9 @@ with tab_table:
     row_count_caption(df, "tool group")
 
     display_cols = [c for c in [
-        "machine_folder", "tool_number", "active_t_code", "s_mode",
+        "machine_folder", "tool_number", "active_t_code",
+        "resolved_tool_name", "resolved_tool_source", "resolved_tool_needs_review",
+        "s_mode",
         "s_mean", "s_min", "s_max", "f_mean", "f_min", "f_max",
         "record_count", "unique_program_count",
         "confidence_label", "match_type",

@@ -19,7 +19,12 @@ from src.dashboard.styling.theme import apply_theme
 from src.dashboard.data_access.loader import (
     load_latest_material_candidates,
     load_latest_cuts,
+    load_latest_tooldb_reference,
+    load_latest_tooling_review,
+    build_proven_tools_df,
 )
+from src.dashboard.data_access.overrides import load_tooling_overrides
+from src.dashboard.data_access.tool_identity import resolve_tool_identity_df, ALL_SOURCES
 from src.dashboard.components.tables import show_table
 from src.dashboard.components.metrics import metric_row
 from src.dashboard.utils.helpers import count_by
@@ -33,9 +38,15 @@ st.caption("Shop-wide machining intelligence patterns extracted from proven CNC 
 # ── Load data ─────────────────────────────────────────────────────────────────
 @st.cache_data(ttl=300)
 def _load():
-    return load_latest_material_candidates(), load_latest_cuts()
+    mc = load_latest_material_candidates()
+    cuts = load_latest_cuts()
+    tr = load_latest_tooling_review()
+    tooldb = load_latest_tooldb_reference()
+    overrides = load_tooling_overrides()
+    enriched = resolve_tool_identity_df(build_proven_tools_df(mc, tr), tooldb_ref=tooldb, overrides=overrides)
+    return mc, cuts, enriched
 
-mc, cuts = _load()
+mc, cuts, mc_enriched = _load()
 
 if mc is None or mc.empty:
     st.warning("No material_candidates export found. Run `py run_match.py`.")
@@ -58,8 +69,8 @@ metric_row([
 st.markdown("---")
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
-tab_combos, tab_sf, tab_intent, tab_conf, tab_future = st.tabs([
-    "Top Tool Combos", "S/F Ranges", "Feed Intent", "Confidence", "Future Sections"
+tab_combos, tab_sf, tab_intent, tab_conf, tab_identity, tab_future = st.tabs([
+    "Top Tool Combos", "S/F Ranges", "Feed Intent", "Confidence", "Tool Identity", "Future Sections"
 ])
 
 with tab_combos:
@@ -207,6 +218,43 @@ with tab_conf:
             f"{dup_count:,}",
             delta=f"{dup_count/total_cuts*100:.1f}% of records" if total_cuts else None,
         )
+
+with tab_identity:
+    st.markdown("#### Tool Identity Source Distribution")
+    if mc_enriched is not None and not mc_enriched.empty and "resolved_tool_source" in mc_enriched.columns:
+        src_counts = mc_enriched["resolved_tool_source"].value_counts().reindex(ALL_SOURCES, fill_value=0)
+        src_df = src_counts.reset_index()
+        src_df.columns = ["Source", "Count"]
+        src_df = src_df[src_df["Count"] > 0]
+
+        _src_colors = {
+            "OVERRIDE": "#00C851",
+            "TOOLDB_ASSEMBLY": "#FF6B35",
+            "TOOLDB_LATHE_FALLBACK": "#FFB347",
+            "PROGRAM": "#00B4D8",
+            "EXCEL": "#7B61FF",
+            "UNKNOWN": "#888888",
+        }
+        fig = px.bar(
+            src_df, x="Count", y="Source", orientation="h",
+            title="Tool Identity Source Breakdown",
+            color="Source",
+            color_discrete_map=_src_colors,
+            template="plotly_dark",
+        )
+        fig.update_layout(
+            paper_bgcolor="#1C1C1C", plot_bgcolor="#1C1C1C",
+            yaxis={"categoryorder": "total ascending"},
+            showlegend=False,
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        needs_review_count = mc_enriched["resolved_tool_needs_review"].astype(bool).sum() if "resolved_tool_needs_review" in mc_enriched.columns else 0
+        col_a, col_b = st.columns(2)
+        col_a.metric("Tool Groups Needing Review", int(needs_review_count))
+        col_b.metric("TOOLDB-Identified Tools", int(src_df[src_df["Source"].isin(["TOOLDB_ASSEMBLY", "TOOLDB_LATHE_FALLBACK"])]["Count"].sum()))
+    else:
+        st.info("No tool identity data. Run `py run_tooldb_import.py` then reload.")
 
 with tab_future:
     st.markdown(

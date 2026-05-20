@@ -64,6 +64,12 @@ def load_latest_tooling_review(exports_dir: Path = _EXPORTS_DIR) -> Optional[pd.
     return _load_csv(path)
 
 
+def load_latest_tooldb_reference(exports_dir: Path = _EXPORTS_DIR) -> Optional[pd.DataFrame]:
+    """Load the most recent tooldb_reference_*.csv export."""
+    path = _find_latest(exports_dir, "tooldb_reference_*.csv")
+    return _load_csv(path)
+
+
 def get_export_status(exports_dir: Path = _EXPORTS_DIR) -> dict:
     """Return availability metadata for each export type."""
     patterns = {
@@ -71,6 +77,7 @@ def get_export_status(exports_dir: Path = _EXPORTS_DIR) -> dict:
         "tool_summary": "tool_summary_*.csv",
         "material_candidates": "material_candidates_*.csv",
         "tooling_review": "tooling_review_*.csv",
+        "tooldb_reference": "tooldb_reference_*.csv",
     }
     status: dict[str, dict] = {}
     for key, pattern in patterns.items():

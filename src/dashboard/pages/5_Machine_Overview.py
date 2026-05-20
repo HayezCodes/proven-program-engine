@@ -18,7 +18,11 @@ from src.dashboard.styling.theme import apply_theme
 from src.dashboard.data_access.loader import (
     load_latest_material_candidates,
     load_latest_tooling_review,
+    load_latest_tooldb_reference,
+    build_proven_tools_df,
 )
+from src.dashboard.data_access.overrides import load_tooling_overrides
+from src.dashboard.data_access.tool_identity import resolve_tool_identity_df
 from src.dashboard.components.tables import show_table, row_count_caption
 from src.dashboard.components.metrics import metric_row
 from src.dashboard.utils.helpers import safe_list
@@ -32,9 +36,14 @@ st.caption("Per-machine intelligence summary derived from proven CNC programs.")
 # ── Load data ─────────────────────────────────────────────────────────────────
 @st.cache_data(ttl=300)
 def _load():
-    return load_latest_material_candidates(), load_latest_tooling_review()
+    mc = load_latest_material_candidates()
+    tr = load_latest_tooling_review()
+    tooldb = load_latest_tooldb_reference()
+    overrides = load_tooling_overrides()
+    enriched = resolve_tool_identity_df(build_proven_tools_df(mc, tr), tooldb_ref=tooldb, overrides=overrides)
+    return enriched, mc, tr
 
-mc, tr = _load()
+mc_enriched, mc, tr = _load()
 
 if mc is None or mc.empty:
     st.warning("No material_candidates export. Run `py run_match.py`.")
@@ -49,7 +58,7 @@ if not machines:
 all_label = "ALL MACHINES"
 machine_sel = st.selectbox("Select Machine", [all_label] + machines, key="mo_machine")
 
-mc_view = mc if machine_sel == all_label else mc[mc["machine_folder"] == machine_sel]
+mc_view = mc_enriched if machine_sel == all_label else mc_enriched[mc_enriched["machine_folder"] == machine_sel]
 tr_view = (
     tr if (tr is None or tr.empty or machine_sel == all_label)
     else tr[tr["machine_folder"] == machine_sel]
@@ -105,11 +114,12 @@ with tab_tools:
         st.plotly_chart(fig, use_container_width=True)
 
         st.markdown("#### Most Common Tools Table")
+        _tool_cols = [c for c in [
+            "active_t_code", "tool_number", "resolved_tool_name", "resolved_tool_source",
+            "s_mode", "record_count", "unique_program_count",
+        ] if c in mc_view.columns]
         show_table(
-            mc_view[["active_t_code", "tool_number", "s_mode", "record_count", "unique_program_count"]]
-            .groupby(["active_t_code", "tool_number", "s_mode"], dropna=False)
-            .agg({"record_count": "sum", "unique_program_count": "sum"})
-            .reset_index()
+            mc_view[_tool_cols]
             .sort_values("record_count", ascending=False)
             .head(30),
             height=350,

@@ -15,13 +15,20 @@ import pandas as pd
 import plotly.express as px
 
 from src.dashboard.styling.theme import apply_theme, match_status_badge
-from src.dashboard.data_access.loader import load_latest_tooling_review
+from src.dashboard.data_access.loader import (
+    load_latest_tooling_review,
+    load_latest_tooldb_reference,
+)
 from src.dashboard.data_access.overrides import (
     apply_tooling_overrides,
     save_tooling_overrides,
     load_tooling_overrides,
 )
-from src.dashboard.components.filters import machine_filter, match_status_filter
+from src.dashboard.data_access.tool_identity import resolve_tool_identity_df
+from src.dashboard.components.filters import (
+    machine_filter, match_status_filter,
+    tool_source_filter, needs_review_filter,
+)
 from src.dashboard.components.tables import show_table, download_csv, row_count_caption
 from src.dashboard.components.metrics import metric_row
 
@@ -37,9 +44,11 @@ st.caption(
 # ── Load data ─────────────────────────────────────────────────────────────────
 @st.cache_data(ttl=300)
 def _load():
-    return load_latest_tooling_review()
+    tr = load_latest_tooling_review()
+    tooldb = load_latest_tooldb_reference()
+    return tr, tooldb
 
-tr = _load()
+tr, tooldb_ref = _load()
 
 if tr is None or tr.empty:
     st.warning(
@@ -48,11 +57,14 @@ if tr is None or tr.empty:
     st.stop()
 
 df = apply_tooling_overrides(tr)
+df = resolve_tool_identity_df(df, tooldb_ref=tooldb_ref)
 
 # ── Sidebar filters ───────────────────────────────────────────────────────────
 st.sidebar.markdown("### Filters")
 df = machine_filter(df, key="tr_machine")
 df = match_status_filter(df, key="tr_status")
+df = tool_source_filter(df, key="tr_tool_src")
+df = needs_review_filter(df, key="tr_needs_review")
 show_override_only = st.sidebar.checkbox("Overridden rows only", key="tr_ov_only")
 if show_override_only and "is_overridden" in df.columns:
     df = df[df["is_overridden"]]
@@ -76,6 +88,7 @@ with tab_view:
     row_count_caption(df, "record")
     display_cols = [c for c in [
         "machine_folder", "tool_number", "active_t_code",
+        "resolved_tool_name", "resolved_tool_source", "resolved_tool_needs_review",
         "program_description", "reference_description", "decimal_size",
         "match_status", "reference_needs_review",
         "review_action", "corrected_description", "notes",

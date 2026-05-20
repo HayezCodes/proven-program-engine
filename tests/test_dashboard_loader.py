@@ -15,6 +15,7 @@ from src.dashboard.data_access.loader import (
     load_latest_tool_summary,
     load_latest_material_candidates,
     load_latest_tooling_review,
+    load_latest_tooldb_reference,
     get_export_status,
     build_proven_tools_df,
 )
@@ -136,6 +137,38 @@ class TestLoadLatestToolingReview:
         f = tmp_path / "tooling_review_20260101.csv"
         f.write_text("machine_folder,match_status\n655,description_match")
         assert load_latest_tooling_review(tmp_path) is not None
+
+
+# ---------------------------------------------------------------------------
+# load_latest_tooldb_reference
+# ---------------------------------------------------------------------------
+
+class TestLoadLatestTooldbReference:
+    def test_returns_none_when_missing(self, tmp_path):
+        assert load_latest_tooldb_reference(tmp_path) is None
+
+    def test_returns_df_when_present(self, tmp_path):
+        f = tmp_path / "tooldb_reference_20260101_120000.csv"
+        f.write_text("machine_id,tool_number,tool_name\n655,1,ENDMILL")
+        result = load_latest_tooldb_reference(tmp_path)
+        assert result is not None
+        assert len(result) == 1
+        assert result.iloc[0]["tool_name"] == "ENDMILL"
+
+    def test_returns_most_recent_when_multiple(self, tmp_path):
+        f1 = tmp_path / "tooldb_reference_20260101_000000.csv"
+        f1.write_text("machine_id,tool_number,tool_name\n655,1,OLD")
+        time.sleep(0.02)
+        f2 = tmp_path / "tooldb_reference_20260102_000000.csv"
+        f2.write_text("machine_id,tool_number,tool_name\n655,1,NEW")
+        result = load_latest_tooldb_reference(tmp_path)
+        assert result.iloc[0]["tool_name"] == "NEW"
+
+    def test_tooldb_reference_in_export_status(self, tmp_path):
+        (tmp_path / "tooldb_reference_20260101_120000.csv").write_text("a,b\n1,2")
+        status = get_export_status(tmp_path)
+        assert "tooldb_reference" in status
+        assert status["tooldb_reference"]["found"] is True
 
 
 # ---------------------------------------------------------------------------
