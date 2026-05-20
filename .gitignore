@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Exports and logs (runtime output — not source)
+exports/
+logs/
+
+# Secrets and local config
+.env
+*.db
+*.sqlite
+
+# Excel workbook (shop data — do not commit without explicit approval)
+*.xlsx
+*.xls
+
+# OS
+.DS_Store
+Thumbs.db
