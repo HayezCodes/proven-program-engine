@@ -22,6 +22,8 @@ from typing import Optional
 
 import pandas as pd
 
+from .safety import assert_safe_write
+
 _MACHINE_ID_RE = re.compile(r'\b(\d{3,4})\b')
 
 _COLUMN_ORDER = [
@@ -431,7 +433,9 @@ def export_tooldb_reference(
     """Write tooldb_reference_<timestamp>.csv to exports_dir. Returns the output path."""
     if timestamp is None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    assert_safe_write(exports_dir)
     exports_dir.mkdir(parents=True, exist_ok=True)
     out_path = exports_dir / f"tooldb_reference_{timestamp}.csv"
+    assert_safe_write(out_path)
     df.to_csv(out_path, index=False)
     return out_path

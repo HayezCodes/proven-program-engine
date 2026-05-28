@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from .safety import assert_safe_write
 from .utils import get_logger
 
 logger = get_logger(__name__)
@@ -168,6 +169,7 @@ def export_tooling_review(
 
     df = match_tool_usage(cuts_df, reference)
     out_path = exports_dir / f"tooling_review_{timestamp}.csv"
+    assert_safe_write(out_path)
     df.to_csv(out_path, index=False)
 
     logger.info(f"Tooling review  -> {out_path}  ({len(df)} rows)")

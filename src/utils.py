@@ -7,6 +7,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from .safety import assert_safe_write
+
 _LOG_DIR = Path(__file__).parent.parent / "logs"
 _INITIALIZED: set[str] = set()
 
@@ -32,10 +34,15 @@ def get_logger(name: str) -> logging.Logger:
 
     _LOG_DIR.mkdir(parents=True, exist_ok=True)
     log_file = _LOG_DIR / f"ppe_{datetime.now().strftime('%Y%m%d')}.log"
-    fh = logging.FileHandler(log_file, encoding="utf-8")
-    fh.setLevel(logging.DEBUG)
-    fh.setFormatter(fmt)
-    logger.addHandler(fh)
+    assert_safe_write(log_file)
+    try:
+        fh = logging.FileHandler(log_file, encoding="utf-8")
+    except OSError as exc:
+        logger.warning(f"File logging disabled for {log_file}: {exc}")
+    else:
+        fh.setLevel(logging.DEBUG)
+        fh.setFormatter(fmt)
+        logger.addHandler(fh)
 
     return logger
 

@@ -25,6 +25,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from .safety import assert_safe_write
 from .utils import get_logger, read_file_lines
 
 logger = get_logger(__name__)
@@ -379,12 +380,14 @@ def parse_from_manifest(
     # Annotate duplicates across the full batch
     _annotate_duplicates(all_records)
 
+    assert_safe_write(exports_dir)
     exports_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     # --- cuts CSV ---
     cuts_path = exports_dir / f"cuts_{timestamp}.csv"
     df_out = pd.DataFrame(all_records)
+    assert_safe_write(cuts_path)
     df_out.to_csv(cuts_path, index=False)
     logger.info(f"Cuts CSV       → {cuts_path}  ({len(df_out)} rows)")
 

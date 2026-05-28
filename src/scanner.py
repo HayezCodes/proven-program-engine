@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from .safety import assert_safe_write
 from .utils import get_logger
 
 logger = get_logger(__name__)
@@ -155,6 +156,7 @@ def export_manifest(records: list[dict], exports_dir: Path) -> tuple[Path, Path]
 
     Returns (csv_path, json_path).
     """
+    assert_safe_write(exports_dir)
     exports_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -162,9 +164,11 @@ def export_manifest(records: list[dict], exports_dir: Path) -> tuple[Path, Path]
     json_path = exports_dir / f"manifest_{timestamp}.json"
 
     df = pd.DataFrame(records)
+    assert_safe_write(csv_path)
     df.to_csv(csv_path, index=False)
     logger.info(f"Manifest CSV  → {csv_path}  ({len(df)} rows)")
 
+    assert_safe_write(json_path)
     with open(json_path, "w", encoding="utf-8") as fh:
         json.dump(records, fh, indent=2)
     logger.info(f"Manifest JSON → {json_path}")

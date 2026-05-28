@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from .safety import assert_safe_write
 from .utils import get_logger
 
 logger = get_logger(__name__)
@@ -101,6 +102,7 @@ def export_parser_summary(
     summary = build_parser_summary(records)
     out_path = exports_dir / f"parser_summary_{timestamp}.json"
 
+    assert_safe_write(out_path)
     with open(out_path, "w", encoding="utf-8") as fh:
         json.dump(summary, fh, indent=2)
 
@@ -189,6 +191,7 @@ def export_tool_summary(
 
     df = build_tool_summary(records)
     out_path = exports_dir / f"tool_summary_{timestamp}.csv"
+    assert_safe_write(out_path)
     df.to_csv(out_path, index=False)
 
     logger.info(f"Tool summary   -> {out_path}  ({len(df)} groups)")

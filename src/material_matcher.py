@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from .safety import assert_safe_write
 from .utils import get_logger
 
 logger = get_logger(__name__)
@@ -373,6 +374,7 @@ def export_material_candidates(
 
     df = match_tool_summary(tool_summary_df, reference)
     out_path = exports_dir / f"material_candidates_{timestamp}.csv"
+    assert_safe_write(out_path)
     df.to_csv(out_path, index=False)
 
     matched = df[df["match_type"].isin(

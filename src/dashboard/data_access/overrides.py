@@ -11,6 +11,8 @@ from typing import Optional
 
 import pandas as pd
 
+from ...safety import assert_safe_write
+
 _OVERRIDES_DIR = Path(__file__).parents[3] / "data" / "overrides"
 
 _TOOLING_OVERRIDE_PATH = _OVERRIDES_DIR / "tooling_overrides.csv"
@@ -44,6 +46,7 @@ def save_tooling_overrides(
     path: Path = _TOOLING_OVERRIDE_PATH,
 ) -> None:
     """Write the complete tooling overrides DataFrame to CSV (full replace)."""
+    assert_safe_write(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(path, index=False)
 
@@ -184,6 +187,7 @@ def upsert_material_override(
     else:
         df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
 
+    assert_safe_write(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(path, index=False)
 

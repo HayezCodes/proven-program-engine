@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from .safety import assert_safe_write
 from .utils import get_logger
 
 logger = get_logger(__name__)
@@ -154,6 +155,7 @@ def export_reference(
 
     df = pd.DataFrame(reference)
     out_path = exports_dir / f"shop_sf_reference_{timestamp}.csv"
+    assert_safe_write(out_path)
     df.to_csv(out_path, index=False)
 
     logger.info(f"Reference table -> {out_path}  ({len(df)} materials)")
