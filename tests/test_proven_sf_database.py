@@ -10,11 +10,14 @@ import pytest
 
 from src.proven_sf_database import (
     SF_DB_COLS,
+    SF_PROGRAMMER_COLS,
     SF_SUMMARY_COLS,
+    build_programmer_view,
     build_sf_database,
     build_sf_summary,
     compute_needs_review,
     detect_latest_exports,
+    export_programmer_view,
     export_sf_database,
     export_sf_summary,
     run_build_sf_database,
@@ -552,6 +555,86 @@ class TestBuildSfSummary:
 
 
 # ---------------------------------------------------------------------------
+# build_programmer_view
+# ---------------------------------------------------------------------------
+
+class TestBuildProgrammerView:
+    def _build_db(self, rows=None, links=None, cands=None) -> pd.DataFrame:
+        return build_sf_database(
+            _cuts(rows or [{}]),
+            links if links is not None else _links(),
+            _tooldb(),
+            _tooling_rev(),
+            cands if cands is not None else _mat_cands(),
+            _router_ctx(),
+        )
+
+    def test_has_core_programmer_columns_only(self):
+        view = build_programmer_view(self._build_db())
+        assert list(view.columns) == SF_PROGRAMMER_COLS
+
+    def test_verified_material_takes_priority(self):
+        links = _links([{"material": "316 STAINLESS"}])
+        cands = _mat_cands([{"material_candidate_1": "4140"}])
+        view = build_programmer_view(self._build_db(links=links, cands=cands))
+        assert view.iloc[0]["material"] == "316 STAINLESS"
+
+    def test_candidate_used_when_verified_unknown(self):
+        links = _links([{"material": "UNKNOWN", "material_source": "UNKNOWN"}])
+        cands = _mat_cands([{"material_candidate_1": "4140"}])
+        view = build_programmer_view(self._build_db(links=links, cands=cands))
+        assert view.iloc[0]["material"] == "4140"
+
+    def test_unknown_material_when_no_verified_or_candidate(self):
+        links = _links([{"material": "UNKNOWN", "material_source": "UNKNOWN"}])
+        cands = _mat_cands([{"material_candidate_1": ""}])
+        view = build_programmer_view(self._build_db(links=links, cands=cands))
+        assert view.iloc[0]["material"] == "UNKNOWN"
+
+    def test_grouping_combines_matching_rows(self):
+        rows = [
+            {"s_value": 400.0, "f_value": 0.010},
+            {"s_value": 600.0, "f_value": 0.014},
+        ]
+        view = build_programmer_view(self._build_db(rows=rows))
+        assert len(view) == 1
+        assert view.iloc[0]["occurrence_count"] == 2
+        assert view.iloc[0]["S_min"] == 400.0
+        assert view.iloc[0]["S_avg"] == 500.0
+        assert view.iloc[0]["S_max"] == 600.0
+        assert view.iloc[0]["F_min"] == pytest.approx(0.010)
+        assert view.iloc[0]["F_avg"] == pytest.approx(0.012)
+        assert view.iloc[0]["F_max"] == pytest.approx(0.014)
+
+    def test_no_manufacturing_intelligence_columns(self):
+        view = build_programmer_view(self._build_db())
+        forbidden = {
+            "matched_job_number",
+            "matched_part_number",
+            "matched_drawing_number",
+            "linked_router_file",
+            "source_file",
+            "raw_line",
+            "prev_line",
+            "next_line",
+        }
+        assert forbidden.isdisjoint(view.columns)
+
+    def test_full_database_preserves_manufacturing_intelligence_fields(self):
+        db = self._build_db()
+        for col in (
+            "matched_job_number",
+            "matched_part_number",
+            "matched_drawing_number",
+            "linked_router_file",
+            "raw_line",
+            "prev_line",
+            "next_line",
+        ):
+            assert col in db.columns
+
+
+# ---------------------------------------------------------------------------
 # Empty / missing optional file handling
 # ---------------------------------------------------------------------------
 
@@ -616,6 +699,17 @@ class TestExports:
         summ = build_sf_summary(db)
         path = export_sf_summary(summ, tmp_path, "20260101_000000")
         assert path.exists()
+
+    def test_export_programmer_view_creates_csv(self, tmp_path):
+        db = build_sf_database(
+            _cuts(), _links(), _tooldb(), _tooling_rev(), _mat_cands(), _router_ctx()
+        )
+        view = build_programmer_view(db)
+        path = export_programmer_view(view, tmp_path, "20260101_000000")
+        assert path.exists()
+        assert path.name == "proven_sf_programmer_view_20260101_000000.csv"
+        result = pd.read_csv(path)
+        assert list(result.columns) == SF_PROGRAMMER_COLS
 
     def test_no_overwrite_different_timestamps(self, tmp_path):
         df = build_sf_database(_cuts(), pd.DataFrame(), pd.DataFrame(),
@@ -692,16 +786,18 @@ class TestRunBuildSfDatabase:
         self._write_csv(exports / "material_candidates_20260101_000001.csv", _mat_cands())
         self._write_csv(exports / "router_program_context_20260101_000001.csv", _router_ctx())
 
-        db_path, summ_path = run_build_sf_database(exports_dir=exports)
+        db_path, summ_path, prog_path = run_build_sf_database(exports_dir=exports)
         assert db_path.exists()
         assert summ_path.exists()
+        assert prog_path.exists()
 
     def test_run_with_no_cuts_creates_empty_outputs(self, tmp_path):
         exports = tmp_path / "empty_exports"
         exports.mkdir()
-        db_path, summ_path = run_build_sf_database(exports_dir=exports)
+        db_path, summ_path, prog_path = run_build_sf_database(exports_dir=exports)
         assert db_path.exists()
         assert summ_path.exists()
+        assert prog_path.exists()
 
     def test_end_to_end_material_in_database(self, tmp_path):
         exports = tmp_path / "exports"
@@ -709,7 +805,9 @@ class TestRunBuildSfDatabase:
         self._write_csv(exports / "cuts_20260101_000001.csv", _cuts())
         self._write_csv(exports / "program_job_links_20260101_000001.csv", _links())
 
-        db_path, _ = run_build_sf_database(exports_dir=exports)
+        db_path, _, prog_path = run_build_sf_database(exports_dir=exports)
         db = pd.read_csv(db_path)
         assert db.iloc[0]["verified_material"] == "316 STAINLESS"
         assert db.iloc[0]["material_source"] == "ROUTER"
+        programmer = pd.read_csv(prog_path)
+        assert "matched_job_number" not in programmer.columns

@@ -97,6 +97,29 @@ SF_SUMMARY_COLS = [
     "needs_review_count",
 ]
 
+SF_PROGRAMMER_COLS = [
+    "material",
+    "machine_folder",
+    "machine_family",
+    "tool_number",
+    "resolved_tool_name",
+    "resolved_tool_description",
+    "tool_identity_source",
+    "S_min",
+    "S_avg",
+    "S_max",
+    "s_mode",
+    "F_min",
+    "F_avg",
+    "F_max",
+    "f_mode",
+    "feed_intent_candidate",
+    "occurrence_count",
+    "program_count",
+    "confidence_mix",
+    "needs_review_count",
+]
+
 _MACHINE_ID_RE = re.compile(r"(\d{3,4})")
 
 # ---------------------------------------------------------------------------
@@ -523,6 +546,84 @@ def build_sf_summary(sf_db_df: pd.DataFrame) -> pd.DataFrame:
     return result.reset_index(drop=True)
 
 
+def _final_material(row) -> str:
+    """Return programmer-facing material using verified material first."""
+    vm = _safe_str(row.get("verified_material"))
+    if vm and vm != "UNKNOWN":
+        return vm
+    mc = _safe_str(row.get("material_candidate_1"))
+    return mc if mc else "UNKNOWN"
+
+
+def _confidence_mix(series: pd.Series) -> str:
+    conf_dist = series.value_counts()
+    return " | ".join(f"{k}:{v}" for k, v in conf_dist.items())
+
+
+def build_programmer_view(sf_db_df: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate the full S/F database into the clean programmer-facing view."""
+    if sf_db_df.empty:
+        return pd.DataFrame(columns=SF_PROGRAMMER_COLS)
+
+    df = sf_db_df.copy()
+    df["material"] = df.apply(_final_material, axis=1)
+
+    has_sf = df["S"].notna() | df["F"].notna()
+    df = df[has_sf]
+    if df.empty:
+        return pd.DataFrame(columns=SF_PROGRAMMER_COLS)
+
+    group_cols = [
+        "material",
+        "machine_folder",
+        "machine_family",
+        "tool_number",
+        "resolved_tool_name",
+        "resolved_tool_description",
+        "s_mode",
+        "f_mode",
+        "feed_intent_candidate",
+    ]
+    for gc in group_cols:
+        if gc not in df.columns:
+            df[gc] = ""
+        df[gc] = df[gc].fillna("").astype(str)
+
+    rows: list[dict] = []
+    for keys, grp in df.groupby(group_cols, dropna=False):
+        s_data = pd.to_numeric(grp["S"], errors="coerce").dropna()
+        f_data = pd.to_numeric(grp["F"], errors="coerce").dropna()
+        tool_sources = (
+            grp.get("tool_identity_source", pd.Series(dtype=str))
+            .dropna()
+            .astype(str)
+            .str.strip()
+        )
+        tool_sources = tool_sources[tool_sources.ne("")]
+
+        row: dict = dict(zip(group_cols, keys))
+        row.update({
+            "tool_identity_source": " | ".join(sorted(tool_sources.unique())),
+            "S_min": round(s_data.min(), 2) if len(s_data) else None,
+            "S_avg": round(s_data.mean(), 2) if len(s_data) else None,
+            "S_max": round(s_data.max(), 2) if len(s_data) else None,
+            "F_min": round(f_data.min(), 6) if len(f_data) else None,
+            "F_avg": round(f_data.mean(), 6) if len(f_data) else None,
+            "F_max": round(f_data.max(), 6) if len(f_data) else None,
+            "occurrence_count": len(grp),
+            "program_count": grp["source_file"].nunique() if "source_file" in grp.columns else 0,
+            "confidence_mix": _confidence_mix(grp["sf_record_confidence"])
+                              if "sf_record_confidence" in grp.columns else "",
+            "needs_review_count": int((grp["needs_review"] == True).sum())
+                                  if "needs_review" in grp.columns else 0,
+        })
+        rows.append(row)
+
+    result = pd.DataFrame(rows, columns=SF_PROGRAMMER_COLS)
+    result.sort_values("occurrence_count", ascending=False, inplace=True)
+    return result.reset_index(drop=True)
+
+
 # ---------------------------------------------------------------------------
 # Exporters
 # ---------------------------------------------------------------------------
@@ -547,6 +648,16 @@ def export_sf_summary(
     return out
 
 
+def export_programmer_view(
+    df: pd.DataFrame, exports_dir: Path, timestamp: str
+) -> Path:
+    out = exports_dir / f"proven_sf_programmer_view_{timestamp}.csv"
+    assert_safe_write(out)
+    (pd.DataFrame(columns=SF_PROGRAMMER_COLS) if df.empty else df).to_csv(out, index=False)
+    logger.info(f"Programmer S/F view -> {out}  ({len(df)} row(s))")
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Pipeline entry point
 # ---------------------------------------------------------------------------
@@ -559,11 +670,11 @@ def run_build_sf_database(
     tooling_path:      Path | None = None,
     mat_cands_path:    Path | None = None,
     router_ctx_path:   Path | None = None,
-) -> tuple[Path, Path]:
+) -> tuple[Path, Path, Path]:
     """Build and export the proven S/F database from latest phase outputs.
 
     Auto-detects latest export files when explicit paths are not supplied.
-    Returns (sf_database_path, sf_summary_path).
+    Returns (sf_database_path, sf_summary_path, programmer_view_path).
     Never writes to production folders. Never overwrites existing exports.
     """
     if exports_dir is None:
@@ -591,9 +702,11 @@ def run_build_sf_database(
     sf_db   = build_sf_database(cuts_df, links_df, tooldb_df, tooling_df,
                                  mat_cands_df, router_df)
     sf_summ = build_sf_summary(sf_db)
+    programmer_view = build_programmer_view(sf_db)
 
     db_path   = export_sf_database(sf_db,   exports_dir, timestamp)
     summ_path = export_sf_summary(sf_summ,  exports_dir, timestamp)
+    prog_path = export_programmer_view(programmer_view, exports_dir, timestamp)
 
     # Coverage log
     if not sf_db.empty:
@@ -610,4 +723,4 @@ def run_build_sf_database(
         )
 
     logger.info("=== SF database build complete ===")
-    return db_path, summ_path
+    return db_path, summ_path, prog_path

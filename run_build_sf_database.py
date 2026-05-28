@@ -4,6 +4,7 @@ run_build_sf_database.py — Build the final proven S/F database.
 Auto-detects the latest exports from all prior phases and builds:
   exports/proven_sf_database_*.csv   — one row per S/F cut record
   exports/proven_sf_summary_*.csv    — aggregated by tool/material/mode
+  exports/proven_sf_programmer_view_*.csv — clean programmer-facing ranges
 
 Usage:
     py run_build_sf_database.py
@@ -42,7 +43,7 @@ def main() -> int:
                         help="Explicit router_program_context_*.csv path")
     args = parser.parse_args()
 
-    db_path, summ_path = run_build_sf_database(
+    db_path, summ_path, prog_path = run_build_sf_database(
         exports_dir=args.exports_dir,
         cuts_path=args.cuts,
         links_path=args.links,
@@ -55,6 +56,7 @@ def main() -> int:
     print("\nExports written:")
     print(f"  S/F database : {db_path}")
     print(f"  S/F summary  : {summ_path}")
+    print(f"  Programmer view : {prog_path}")
     return 0
 
 

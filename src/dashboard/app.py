@@ -14,10 +14,10 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 import streamlit as st
+import pandas as pd
 
 from src.dashboard.styling.theme import apply_theme
-from src.dashboard.data_access.loader import get_export_status, load_latest_material_candidates
-from src.dashboard.utils.helpers import count_by
+from src.dashboard.data_access.loader import get_export_status, load_proven_sf_dashboard_df
 
 st.set_page_config(
     page_title="Proven Program Engine",
@@ -51,8 +51,8 @@ _icons = {"found": "✓", "missing": "✗"}
 
 col1, col2, col3, col4 = st.columns(4)
 _cards = [
-    ("cuts", "Cuts", col1),
-    ("tool_summary", "Tool Summary", col2),
+    ("proven_sf_programmer_view", "Proven S/F", col1),
+    ("proven_sf_database", "Full S/F DB", col2),
     ("material_candidates", "Material Candidates", col3),
     ("tooling_review", "Tooling Review", col4),
 ]
@@ -68,26 +68,31 @@ for key, label, col in _cards:
 st.markdown("---")
 st.markdown("### Quick Stats")
 
-mc = load_latest_material_candidates()
+sf = load_proven_sf_dashboard_df()
 
-if mc is not None and not mc.empty:
-    total_groups = len(mc)
-    unique_machines = mc["machine_folder"].nunique() if "machine_folder" in mc.columns else 0
-    high_conf = (mc["confidence_label"] == "HIGH").sum() if "confidence_label" in mc.columns else 0
-    matched = mc["match_type"].isin(
-        ["exact_match", "close_match", "multiple_possible_matches"]
-    ).sum() if "match_type" in mc.columns else 0
+if sf is not None and not sf.empty:
+    total_groups = len(sf)
+    unique_machines = sf["machine_folder"].nunique() if "machine_folder" in sf.columns else 0
+    materials = sf["material"].nunique() if "material" in sf.columns else 0
+    occurrences = (
+        pd.to_numeric(sf["occurrence_count"], errors="coerce").fillna(0).sum()
+        if "occurrence_count" in sf.columns else total_groups
+    )
+    review_flags = (
+        pd.to_numeric(sf["needs_review_count"], errors="coerce").fillna(0).gt(0).sum()
+        if "needs_review_count" in sf.columns else 0
+    )
 
     c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Tool Groups", f"{total_groups:,}")
+    c1.metric("S/F Groups", f"{total_groups:,}")
     c2.metric("Machines", f"{unique_machines:,}")
-    c3.metric("High Confidence", f"{high_conf:,}")
-    c4.metric("With Material Match", f"{matched:,}")
-    c5.metric("Match Rate", f"{matched/total_groups*100:.0f}%" if total_groups else "—")
+    c3.metric("Materials", f"{materials:,}")
+    c4.metric("Occurrences", f"{int(occurrences):,}")
+    c5.metric("Review Flags", f"{int(review_flags):,}")
 else:
     st.info(
-        "No material_candidates export found. "
-        "Run `py run_parse.py` then `py run_match.py` to generate data."
+        "No Proven S/F programmer view found. "
+        "Run `py run_build_sf_database.py` to generate the main dashboard data."
     )
 
 # ── Navigation Guide ──────────────────────────────────────────────────────────
@@ -95,7 +100,7 @@ st.markdown("---")
 st.markdown("### Pages")
 
 nav_items = [
-    ("1 — Proven Tools", "Review proven S/F ranges, material candidates, and feed intent by tool."),
+    ("1 — Proven S/F", "Programmer-focused proven speed and feed ranges by material, machine, and tool."),
     ("2 — Material Candidates", "Approve or reject inferred material matches."),
     ("3 — Tooling Review", "Compare parsed tool descriptions against the shop reference. Save corrections."),
     ("4 — Program Search", "Search raw cut records by program, tool, S/F value, or keyword."),

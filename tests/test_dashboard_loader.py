@@ -16,6 +16,8 @@ from src.dashboard.data_access.loader import (
     load_latest_material_candidates,
     load_latest_tooling_review,
     load_latest_tooldb_reference,
+    load_latest_proven_sf_programmer_view,
+    load_proven_sf_dashboard_df,
     get_export_status,
     build_proven_tools_df,
 )
@@ -171,6 +173,39 @@ class TestLoadLatestTooldbReference:
         assert status["tooldb_reference"]["found"] is True
 
 
+class TestLoadLatestProvenSfProgrammerView:
+    def test_returns_none_when_missing(self, tmp_path):
+        assert load_latest_proven_sf_programmer_view(tmp_path) is None
+
+    def test_returns_latest_programmer_view(self, tmp_path):
+        (tmp_path / "proven_sf_programmer_view_20260101_000000.csv").write_text("material\nOLD")
+        time.sleep(0.02)
+        (tmp_path / "proven_sf_programmer_view_20260102_000000.csv").write_text("material\nNEW")
+        result = load_latest_proven_sf_programmer_view(tmp_path)
+        assert result is not None
+        assert result.iloc[0]["material"] == "NEW"
+
+
+class TestLoadProvenSfDashboardDf:
+    def test_prefers_programmer_view_when_available(self, tmp_path):
+        (tmp_path / "proven_sf_database_20260101_000000.csv").write_text(
+            "matched_job_number,machine_folder\n9001,655"
+        )
+        (tmp_path / "proven_sf_programmer_view_20260101_000000.csv").write_text(
+            "material,machine_folder\n316,655"
+        )
+        result = load_proven_sf_dashboard_df(tmp_path)
+        assert list(result.columns) == ["material", "machine_folder"]
+        assert "matched_job_number" not in result.columns
+
+    def test_falls_back_to_full_database_when_programmer_view_missing(self, tmp_path):
+        (tmp_path / "proven_sf_database_20260101_000000.csv").write_text(
+            "matched_job_number,machine_folder\n9001,655"
+        )
+        result = load_proven_sf_dashboard_df(tmp_path)
+        assert "matched_job_number" in result.columns
+
+
 # ---------------------------------------------------------------------------
 # get_export_status
 # ---------------------------------------------------------------------------
@@ -178,7 +213,13 @@ class TestLoadLatestTooldbReference:
 class TestGetExportStatus:
     def test_all_missing_when_empty_dir(self, tmp_path):
         status = get_export_status(tmp_path)
-        for key in ("cuts", "tool_summary", "material_candidates", "tooling_review"):
+        for key in (
+            "cuts",
+            "tool_summary",
+            "material_candidates",
+            "tooling_review",
+            "proven_sf_programmer_view",
+        ):
             assert status[key]["found"] is False
 
     def test_found_when_file_present(self, tmp_path):

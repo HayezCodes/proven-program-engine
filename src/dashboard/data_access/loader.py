@@ -70,6 +70,18 @@ def load_latest_tooldb_reference(exports_dir: Path = _EXPORTS_DIR) -> Optional[p
     return _load_csv(path)
 
 
+def load_latest_proven_sf_database(exports_dir: Path = _EXPORTS_DIR) -> Optional[pd.DataFrame]:
+    """Load the most recent full proven_sf_database_*.csv export."""
+    path = _find_latest(exports_dir, "proven_sf_database_*.csv")
+    return _load_csv(path)
+
+
+def load_latest_proven_sf_programmer_view(exports_dir: Path = _EXPORTS_DIR) -> Optional[pd.DataFrame]:
+    """Load the most recent programmer-facing proven S/F export."""
+    path = _find_latest(exports_dir, "proven_sf_programmer_view_*.csv")
+    return _load_csv(path)
+
+
 def get_export_status(exports_dir: Path = _EXPORTS_DIR) -> dict:
     """Return availability metadata for each export type."""
     patterns = {
@@ -78,6 +90,8 @@ def get_export_status(exports_dir: Path = _EXPORTS_DIR) -> dict:
         "material_candidates": "material_candidates_*.csv",
         "tooling_review": "tooling_review_*.csv",
         "tooldb_reference": "tooldb_reference_*.csv",
+        "proven_sf_database": "proven_sf_database_*.csv",
+        "proven_sf_programmer_view": "proven_sf_programmer_view_*.csv",
     }
     status: dict[str, dict] = {}
     for key, pattern in patterns.items():
@@ -139,3 +153,17 @@ def build_proven_tools_df(
         )
 
     return df
+
+
+def load_proven_sf_dashboard_df(exports_dir: Path = _EXPORTS_DIR) -> pd.DataFrame:
+    """Load the preferred Proven S/F dashboard table.
+
+    Programmer view is preferred. The full database is only a fallback for
+    older export folders that have not generated the simplified view yet.
+    """
+    programmer = load_latest_proven_sf_programmer_view(exports_dir)
+    if programmer is not None:
+        return programmer
+
+    full = load_latest_proven_sf_database(exports_dir)
+    return full if full is not None else pd.DataFrame()
