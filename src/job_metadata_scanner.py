@@ -53,7 +53,7 @@ _JOB_RE = re.compile(
     r"(?:JOB\s*(?:NO|NUMBER|NUM|#)\.?\s*[:\-]?\s*"
     r"|WORK\s+ORDER\s*[#:\-]?\s*"
     r"|W\.?O\.?\s*[#:\-]?\s*"
-    r")\s*([0-9]{4,7}(?:\-[0-9]{1,6})?)",
+    r")\s*([A-Z]?[0-9]{4,7}(?:\-[0-9]{1,6})?)",
     re.IGNORECASE,
 )
 
@@ -82,7 +82,42 @@ _MAT_RE = re.compile(
     re.IGNORECASE,
 )
 
+_EXPLICIT_MATERIAL_RE = re.compile(
+    r"(?im)^\s*Material\s*:\s*([^\n\r]{3,120})$"
+)
+
+_MATERIAL_TOKEN_PATTERNS = [
+    re.compile(
+        r"\b(?:10[124][058]|11[0-9]{2}|12L14|41[034]0|43[34]0|46[24]0|86[24]0|93[124]0)\b"
+        r"(?:\s+(?:HR|HT|H\.T\.|CD|CF|CRS|HRS|ANN(?:EALED)?|NORM(?:ALIZED)?|"
+        r"PREHARD|ALLOY|STEEL))*",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:17-4|15-5)\s*(?:PH)?(?:\s+(?:SS|SST|STAINLESS|STEEL))*",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:303|304L?|316L?|321|347|410|416|420|440C)\b"
+        r"(?:\s+(?:SS|SST|STAINLESS|STEEL))*",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\bS31803\b(?:\s+DUPLEX)?", re.IGNORECASE),
+    re.compile(r"\bHASTELLOY\s*C-?276\b", re.IGNORECASE),
+    re.compile(r"\bMONEL\s*K-?500\b", re.IGNORECASE),
+    re.compile(r"\bINCONEL\s*\d{3}\b", re.IGNORECASE),
+    re.compile(r"\b(?:6061|7075|2024)\b(?:\s+ALUMINUM|\s+ALUM)?", re.IGNORECASE),
+]
+
+_MATERIAL_NOISE_RE = re.compile(
+    r"\b(?:CUTTING\s+CHARGE|PO\s+#?|PURCHASE\s+ORDER|QUOTE#?|VENDOR|QTY|"
+    r"RECEIVED|CERTIFICATION|SIEMENS\s+SPECIFICATION)\b",
+    re.IGNORECASE,
+)
+
 _OP_ROW_RE   = re.compile(r"^\s*(\d{2,3})\s{2,}(.+)$")
+_TRAVELER_OP_RE = re.compile(r"^\s*(\d)\|(\d{2})\s+(\S+)\s+.*$")
+_WC_LINE_RE = re.compile(r"^\s*(\d{3})\s+([A-Z][A-Z /-]{2,20})\b(.*)$")
 _OP_LABEL_RE = re.compile(
     r"(?:OP(?:ERATION)?\s+)(\d+)\s*[:\-]\s*(.+)$",
     re.IGNORECASE,
@@ -208,7 +243,9 @@ def sample_pdf_first_page(path: Path) -> tuple[str, bool]:
         with pdfplumber.open(path) as pdf:
             if not pdf.pages:
                 return "", False
-            text = pdf.pages[0].extract_text() or ""
+            normal = pdf.pages[0].extract_text() or ""
+            flow = pdf.pages[0].extract_text(use_text_flow=True) or ""
+            text = normal if flow in normal else f"{normal}\n{flow}"
         stripped = text.strip()
         return stripped, bool(stripped)
     except Exception as exc:
@@ -309,7 +346,11 @@ def extract_pdf_text(path: Path) -> tuple[str, str]:
     try:
         import pdfplumber
         with pdfplumber.open(path) as pdf:
-            pages_text = [page.extract_text() or "" for page in pdf.pages]
+            pages_text = []
+            for page in pdf.pages:
+                normal = page.extract_text() or ""
+                flow = page.extract_text(use_text_flow=True) or ""
+                pages_text.append(normal if flow in normal else f"{normal}\n{flow}")
         text = "\n".join(pages_text).strip()
         if not text:
             return "", "unreadable_pdf"
@@ -340,14 +381,23 @@ def _first_match(pattern: re.Pattern, text: str) -> str:
 
 
 def extract_job_number(text: str) -> str:
+    direct = re.search(r"(?im)^\s*Job\s*:\s*([A-Z]?[0-9]{4,7}(?:-[0-9]{1,6})?)\b", text)
+    if direct:
+        return direct.group(1).strip()
     return _first_match(_JOB_RE, text)
 
 
 def extract_part_number(text: str) -> str:
+    direct = re.search(r"(?im)^\s*Part\s*:\s*([A-Z0-9][A-Z0-9\-_/\.]{2,29})\b", text)
+    if direct:
+        return direct.group(1).strip()
     return _first_match(_PART_RE, text)
 
 
 def extract_drawing_number(text: str) -> str:
+    direct = re.search(r"(?im)\bDrawing\s*:\s*([A-Z0-9][A-Z0-9\-_/\.]{1,29})\b", text)
+    if direct:
+        return direct.group(1).strip()
     return _first_match(_DWG_RE, text)
 
 
@@ -355,23 +405,158 @@ def extract_revision(text: str) -> str:
     return _first_match(_REV_RE, text)
 
 
-def extract_material(text: str) -> str:
+def _clean_material_raw(raw: str) -> str:
+    return re.sub(r"\s+", " ", raw).strip(" \t.,;:-")
+
+
+def normalize_material(raw: str) -> str:
+    """Normalize raw traveler material text to the alloy/condition only."""
+    candidate = _clean_material_raw(raw)
+    if not candidate or _MATERIAL_NOISE_RE.search(candidate):
+        return ""
+
+    candidate = re.sub(r"(?i)\bMaterial\s*:\s*", "", candidate)
+    candidate = re.sub(r"(?i)\b(?:Diameter|Dia\.?)\b", " DIA ", candidate)
+    candidate = re.sub(r"(?i)\b(?:Length|Long)\b.*$", "", candidate)
+    candidate = re.sub(r"(?i)=+\s*Cut\s+to\b.*$", "", candidate)
+
+    for pattern in _MATERIAL_TOKEN_PATTERNS:
+        m = pattern.search(candidate)
+        if m:
+            material = _clean_material_raw(m.group(0)).upper()
+            material = material.replace("H.T.", "HT")
+            material = re.sub(r"\s+", " ", material)
+            return material
+
+    return ""
+
+
+def _candidate_material_lines(text: str) -> tuple[str, str]:
+    # 1. Explicit operation block line beginning with Material:
+    for m in _EXPLICIT_MATERIAL_RE.finditer(text):
+        raw = _clean_material_raw(m.group(1))
+        normalized = normalize_material(raw)
+        if normalized:
+            return raw, normalized
+
+    lines = [_clean_material_raw(line) for line in text.splitlines()]
+
+    # 2. Materials section description lines.
+    in_materials = False
+    for line in lines:
+        if re.fullmatch(r"(?i)(?:Materials?|Buys Comments)", line):
+            in_materials = True
+            continue
+        if in_materials:
+            if re.match(r"(?i)^Part:\s+", line):
+                in_materials = False
+                continue
+            normalized = normalize_material(line)
+            if normalized:
+                return line, normalized
+
+    # 3. Header/title material hints.
+    for line in lines[:80]:
+        if re.search(r"(?i)\b(?:shaft|plate|bar|tube|round|blank|casting|forging)\b", line):
+            normalized = normalize_material(line)
+            if normalized:
+                return line, normalized
+
+    # 4. Existing fallback logic.
     raw = _first_match(_MAT_RE, text)
-    return raw.strip().rstrip(".,;") if raw else ""
+    normalized = normalize_material(raw)
+    if normalized:
+        return _clean_material_raw(raw), normalized
+
+    return "", ""
+
+
+def extract_material_details(text: str) -> tuple[str, str]:
+    """Return (raw_material_text, normalized_material)."""
+    return _candidate_material_lines(text)
+
+
+def extract_material(text: str) -> str:
+    return extract_material_details(text)[1]
 
 
 def _machine_keyword(text: str) -> str:
     m = _MACHINE_RE.search(text)
-    return m.group(1).strip() if m else ""
+    return m.group(1).strip().upper() if m else ""
+
+
+def _work_center_code(text: str) -> str:
+    m = re.search(r"\b(\d{3})\b", str(text))
+    return m.group(1) if m else ""
+
+
+def _work_center_type(text: str) -> str:
+    machine = _machine_keyword(text)
+    aliases = {
+        "TURNING": "LATHE",
+        "MILLING": "MILL",
+        "VMC": "MILL",
+        "HMC": "MILL",
+        "GRINDING": "GRIND",
+        "INSPECTION": "INSPECT",
+        "DRILLING": "DRILL",
+        "BORING": "BORE",
+        "BAND SAW": "SAW",
+    }
+    return aliases.get(machine, machine)
+
+
+def _type_from_compact_work_center(token: str) -> str:
+    compact = re.sub(r"[^A-Z]", "", str(token).upper())
+    if "LATH" in compact:
+        return "LATHE"
+    if "MILL" in compact:
+        return "MILL"
+    if "GRIND" in compact or "GRIN" in compact:
+        return "GRIND"
+    if "INSP" in compact:
+        return "INSPECT"
+    if "LASER" in compact or "LASE" in compact:
+        return "LASER"
+    if "SHIP" in compact:
+        return "SHIP"
+    if "MATRCV" in compact:
+        return "MATRCV"
+    if "TOOL" in compact:
+        return "TOOL"
+    if "PROG" in compact:
+        return "PROG"
+    if "MODEL" in compact or "MOD" in compact:
+        return "MODEL"
+    return ""
+
+
+def _format_work_center(code: str, typ: str) -> str:
+    code = str(code or "").strip()
+    typ = str(typ or "").strip().upper()
+    if code and typ:
+        return f"{code} {typ}"
+    return code or typ
 
 
 def extract_work_centers(text: str) -> str:
     seen: list[str] = []
     seen_upper: set[str] = set()
-    for m in _MACHINE_RE.finditer(text):
-        kw = m.group(1).strip()
+    wc_re = re.compile(r"\b(\d{3})\s+([A-Z][A-Z /-]{2,20})\b")
+    for m in wc_re.finditer(text):
+        code = m.group(1)
+        typ = _work_center_type(m.group(2))
+        if not typ:
+            continue
+        kw = f"{code} {typ}"
         ku = kw.upper()
         if ku not in seen_upper:
+            seen.append(kw)
+            seen_upper.add(ku)
+    for m in _MACHINE_RE.finditer(text):
+        kw = m.group(1).strip().upper()
+        ku = kw.upper()
+        if kw and ku not in seen_upper:
             seen.append(kw)
             seen_upper.add(ku)
     return ", ".join(seen)
@@ -404,10 +589,73 @@ def extract_routing_operations(
     """Extract manufacturing routing operations from document text."""
     ops: list[dict] = []
     seq = 0
+    pending_wc: dict | None = None
+    current_op: dict | None = None
 
     for line in text.splitlines():
         stripped = line.strip()
         if not stripped:
+            continue
+
+        traveler_match = _TRAVELER_OP_RE.match(stripped)
+        if traveler_match:
+            wc_code = traveler_match.group(1) + traveler_match.group(2)
+            wc_type = _type_from_compact_work_center(traveler_match.group(3))
+            pending_wc = {
+                "work_center_code": wc_code,
+                "work_center_type": wc_type,
+                "work_center": _format_work_center(wc_code, wc_type),
+            }
+            current_op = None
+            continue
+
+        if pending_wc:
+            op_desc = re.match(r"^\s*(\d{1,3})\s+(.+)$", stripped)
+            if op_desc:
+                op_num_str = op_desc.group(1)
+                description = op_desc.group(2).strip()
+                seq += 1
+                current_op = {
+                    "source_file": source_file,
+                    "job_number": job_number,
+                    "operation_sequence": seq,
+                    "operation_number": op_num_str,
+                    "work_center": pending_wc["work_center"],
+                    "work_center_code": pending_wc["work_center_code"],
+                    "work_center_type": pending_wc["work_center_type"],
+                    "machine": pending_wc["work_center_type"] or _machine_keyword(description),
+                    "operation_description": description,
+                    "operation_notes": "",
+                }
+                ops.append(current_op)
+                pending_wc = None
+                continue
+
+        wc_line = _WC_LINE_RE.match(stripped)
+        if wc_line and current_op is not None:
+            wc_code = wc_line.group(1)
+            wc_type = _work_center_type(wc_line.group(2))
+            if wc_code == current_op.get("work_center_code") or not current_op.get("work_center_code"):
+                current_op["work_center_code"] = wc_code
+                current_op["work_center_type"] = wc_type
+                current_op["work_center"] = _format_work_center(wc_code, wc_type)
+                current_op["machine"] = wc_type
+            extra = _clean_material_raw(wc_line.group(3))
+            if extra:
+                current_op["operation_notes"] = (
+                    f"{current_op['operation_notes']} {extra}".strip()
+                )
+            continue
+
+        if (
+            current_op is not None
+            and not _OP_ROW_RE.match(stripped)
+            and not _OP_LABEL_RE.match(stripped)
+        ):
+            if not re.match(r"^(?:Part|Rev):\s+", stripped, flags=re.IGNORECASE):
+                current_op["operation_notes"] = (
+                    f"{current_op['operation_notes']} {stripped}".strip()
+                )
             continue
 
         m = _OP_ROW_RE.match(stripped)
@@ -432,10 +680,13 @@ def extract_routing_operations(
                 "operation_sequence": seq,
                 "operation_number": op_num_str,
                 "work_center": work_center,
+                "work_center_code": _work_center_code(work_center),
+                "work_center_type": _work_center_type(work_center + " " + description),
                 "machine": _machine_keyword(work_center + " " + description),
                 "operation_description": description,
                 "operation_notes": "",
             })
+            current_op = ops[-1]
             continue
 
         m = _OP_LABEL_RE.match(stripped)
@@ -449,10 +700,13 @@ def extract_routing_operations(
                 "operation_sequence": seq,
                 "operation_number": op_num_str,
                 "work_center": "",
+                "work_center_code": "",
+                "work_center_type": _work_center_type(description),
                 "machine": _machine_keyword(description),
                 "operation_description": description,
                 "operation_notes": "",
             })
+            current_op = ops[-1]
 
     return ops
 
@@ -503,7 +757,8 @@ def build_job_metadata_record(
     part_number    = extract_part_number(text)
     drawing_number = extract_drawing_number(text)
     revision       = extract_revision(text)
-    material       = extract_material(text)
+    raw_material_text, normalized_material = extract_material_details(text)
+    material       = normalized_material
     work_centers   = extract_work_centers(text)
     ops            = extract_routing_operations(text, str(path), job_number)
 
@@ -516,6 +771,8 @@ def build_job_metadata_record(
         "drawing_number":         drawing_number,
         "revision":               revision,
         "material":               material,
+        "raw_material_text":      raw_material_text,
+        "normalized_material":    normalized_material,
         "work_centers":           work_centers,
         "operation_count":        len(ops),
         "extraction_confidence":  score_confidence(
@@ -569,7 +826,8 @@ def build_shared_print_record(
     part_number    = extract_part_number(text)
     drawing_number = extract_drawing_number(text)
     revision       = extract_revision(text)
-    material       = extract_material(text)
+    raw_material_text, normalized_material = extract_material_details(text)
+    material       = normalized_material
 
     count = sum(bool(v) for v in [part_number, drawing_number, revision, material])
     if count >= 3:
@@ -587,6 +845,8 @@ def build_shared_print_record(
         "drawing_number":   drawing_number,
         "revision":         revision,
         "material":         material,
+        "raw_material_text": raw_material_text,
+        "normalized_material": normalized_material,
         "file_size_bytes":  file_size if file_size is not None else "",
         "extraction_confidence":  confidence,
         "extraction_notes":       notes,
@@ -862,7 +1122,8 @@ def scan_shared_prints(
 _JOB_META_COLS = [
     "source_file", "filename", "modified_datetime",
     "job_number", "part_number", "drawing_number",
-    "revision", "material", "work_centers", "operation_count",
+    "revision", "material", "raw_material_text", "normalized_material",
+    "work_centers", "operation_count",
     "extraction_confidence", "extraction_notes",
     # Phase 6A-Optimize fields
     "filename_classification", "content_classification",
@@ -873,7 +1134,8 @@ _JOB_META_COLS = [
 _PRINT_INDEX_COLS = [
     "source_file", "filename", "modified_datetime",
     "part_number", "drawing_number",
-    "revision", "material", "file_size_bytes",
+    "revision", "material", "raw_material_text", "normalized_material",
+    "file_size_bytes",
     "extraction_confidence", "extraction_notes",
     # Phase 6A-Optimize fields
     "filename_classification", "content_classification",
@@ -883,7 +1145,8 @@ _PRINT_INDEX_COLS = [
 
 _ROUTER_OPS_COLS = [
     "source_file", "job_number", "operation_sequence", "operation_number",
-    "work_center", "machine", "operation_description", "operation_notes",
+    "work_center", "work_center_code", "work_center_type", "machine",
+    "operation_description", "operation_notes",
 ]
 
 

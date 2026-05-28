@@ -46,7 +46,8 @@ _MATERIAL_BACKFILL_COLS = [
 
 _ROUTER_CONTEXT_COLS = [
     "matched_job_number", "matched_part_number", "matched_drawing_number",
-    "operation_number", "work_center", "machine_hint", "operation_description",
+    "operation_number", "work_center", "work_center_code", "work_center_type",
+    "machine_hint", "operation_description",
     "program_reference", "source_router_file", "source_file", "machine_folder",
     "context_match_confidence", "context_match_reason",
 ]
@@ -201,12 +202,20 @@ def build_indexes(
 # ---------------------------------------------------------------------------
 
 def _mat_from_job(job_row: dict) -> tuple[str, str, str]:
-    mat = str(job_row.get("material", "") or "").strip()
+    mat = str(
+        job_row.get("normalized_material", "")
+        or job_row.get("material", "")
+        or ""
+    ).strip()
     return (mat, "ROUTER", "HIGH") if mat else ("UNKNOWN", "UNKNOWN", "NONE")
 
 
 def _mat_from_print(print_row: dict) -> tuple[str, str, str]:
-    mat = str(print_row.get("material", "") or "").strip()
+    mat = str(
+        print_row.get("normalized_material", "")
+        or print_row.get("material", "")
+        or ""
+    ).strip()
     return (mat, "SHARED_PRINT", "MEDIUM") if mat else ("UNKNOWN", "UNKNOWN", "NONE")
 
 
@@ -712,6 +721,8 @@ def build_router_program_context(
                 "matched_drawing_number": str(link.get("matched_drawing_number", "") or ""),
                 "operation_number":       str(op.get("operation_number",    "") or ""),
                 "work_center":            str(op.get("work_center",         "") or ""),
+                "work_center_code":       str(op.get("work_center_code",    "") or ""),
+                "work_center_type":       str(op.get("work_center_type",    "") or ""),
                 "machine_hint":           str(op.get("machine",             "") or ""),
                 "operation_description":  str(op.get("operation_description","") or ""),
                 "program_reference":      str(link.get("filename",          "") or ""),

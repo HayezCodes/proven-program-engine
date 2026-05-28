@@ -31,10 +31,12 @@ from src.job_metadata_scanner import (
     extract_file_text,
     extract_job_number,
     extract_material,
+    extract_material_details,
     extract_part_number,
     extract_revision,
     extract_routing_operations,
     extract_work_centers,
+    normalize_material,
     sample_pdf_first_page,
     scan_job_folders,
     scan_shared_prints,
@@ -103,6 +105,37 @@ OP 20 - MILL FEATURES ON VMC
 OP 30 - INSPECT TO PRINT
 """
 
+DRMS_TRAVELER_TEXT = """\
+EMPOWER MANUFACTURING
+Job: D26304
+Part: L1D30855093 Customer PO: 4520343717 Quote: Q-260398
+"A" Shaft, 4140 HR HT Line: 30
+Rev: AA Drawing: L1D30855093A
+
+Routing Comments
+WC/Vendor Sch Start
+Oper/Serv Operation Key Sch End Description Setup Run Rate Run
+4|17 L6ATH2E 254 6221541z ~ 1.00 0.60 Parts/Hr 1.67
+3 Center Both Ends.
+Material: 6-1/2" Diameter 4140 HR HT
+417 LATHE Length: 55.400 +.062 -.000 Long
+4|13 L6ATH2E 254 6223543 ~ 0.50 1.50 Parts/Hr 0.67
+5 Face Pulley End Of Shaft to Remove Drive Blade Marks Both Ends.
+413 LATHE Drill, Tap, Counter Bore, Re-Center.
+6|55 M6ILL2254 6225545+ ~ 1.00 2.00 Parts/Hr 0.50
+6 Program Number:
+655 MILL Keyways 5/16 and Above In Width Shall Be .030".
+5|19 G6RIN2D 254 62265461 ~ 1.00 0.35 Parts/Hr 2.86
+7 === Recalibrate Every 10 Minutes and Between Each Diameter ====
+519 GRIND Grind: Live Centers Required
+
+Materials
+Material
+75016 EMJ 4140 HR HT 6.500 DIA 522.00
+4140 HR HT 6.500 DIA
+75017 EMJ CUTTING CHARGE 1.00
+"""
+
 # ---------------------------------------------------------------------------
 # extract_job_number
 # ---------------------------------------------------------------------------
@@ -136,6 +169,9 @@ class TestExtractJobNumber:
     def test_from_traveler(self):
         assert extract_job_number(TRAVELER_TEXT) == "24567"
 
+    def test_alpha_prefixed_job_from_drms_traveler(self):
+        assert extract_job_number(DRMS_TRAVELER_TEXT) == "D26304"
+
 
 # ---------------------------------------------------------------------------
 # extract_part_number
@@ -166,6 +202,9 @@ class TestExtractPartNumber:
     def test_from_router(self):
         assert extract_part_number(ROUTER_TEXT) == "SS316-FLANGE-002"
 
+    def test_plain_part_label_from_drms_traveler(self):
+        assert extract_part_number(DRMS_TRAVELER_TEXT) == "L1D30855093"
+
 
 # ---------------------------------------------------------------------------
 # extract_drawing_number
@@ -189,6 +228,9 @@ class TestExtractDrawingNumber:
 
     def test_from_traveler(self):
         assert extract_drawing_number(TRAVELER_TEXT) == "D-4140-001"
+
+    def test_plain_drawing_label_from_drms_traveler(self):
+        assert extract_drawing_number(DRMS_TRAVELER_TEXT) == "L1D30855093A"
 
 
 # ---------------------------------------------------------------------------
@@ -238,6 +280,21 @@ class TestExtractMaterial:
 
     def test_from_router(self):
         assert "316" in extract_material(ROUTER_TEXT)
+
+    def test_normalizes_explicit_operation_material(self):
+        assert extract_material(DRMS_TRAVELER_TEXT) == "4140 HR HT"
+
+    def test_normalizes_materials_section_dia_line(self):
+        text = "Materials\n75016 EMJ 4140 HR HT 6.500 DIA 522.00\n"
+        raw, normalized = extract_material_details(text)
+        assert raw == "75016 EMJ 4140 HR HT 6.500 DIA 522.00"
+        assert normalized == "4140 HR HT"
+
+    def test_normalizes_header_title_hint(self):
+        assert extract_material('"A" Shaft, 4140 HR HT') == "4140 HR HT"
+
+    def test_excludes_cutting_charge(self):
+        assert normalize_material("75017 EMJ CUTTING CHARGE 1.00") == ""
 
 
 # ---------------------------------------------------------------------------
@@ -355,6 +412,19 @@ class TestExtractRoutingOperations:
             assert op["source_file"] == "some/path/file.txt"
             assert op["job_number"] == "24567"
 
+    def test_drms_work_center_codes_and_types(self):
+        ops = extract_routing_operations(DRMS_TRAVELER_TEXT, "traveler.pdf", "D26304")
+        pairs = {(op["work_center_code"], op["work_center_type"]) for op in ops}
+        assert ("417", "LATHE") in pairs
+        assert ("413", "LATHE") in pairs
+        assert ("655", "MILL") in pairs
+        assert ("519", "GRIND") in pairs
+
+    def test_operation_notes_capture_detail_lines(self):
+        ops = extract_routing_operations(DRMS_TRAVELER_TEXT, "traveler.pdf", "D26304")
+        op417 = next(op for op in ops if op["work_center"] == "417 LATHE")
+        assert "Length: 55.400" in op417["operation_notes"]
+
 
 # ---------------------------------------------------------------------------
 # extract_file_text (text-file path only; PDF tested via build_ tests)
@@ -420,6 +490,22 @@ class TestBuildJobMetadataRecord:
         assert meta["extraction_confidence"] == "LOW"
         assert ops == []
 
+    def test_drms_traveler_expected_fields(self, tmp_path):
+        f = tmp_path / "OP_Traveler_DRMS.txt"
+        f.write_text(DRMS_TRAVELER_TEXT, encoding="utf-8")
+        meta, ops = build_job_metadata_record(f)
+        assert meta["job_number"] == "D26304"
+        assert meta["part_number"] == "L1D30855093"
+        assert meta["drawing_number"] == "L1D30855093A"
+        assert meta["revision"] == "AA"
+        assert meta["raw_material_text"] == '6-1/2" Diameter 4140 HR HT'
+        assert meta["normalized_material"] == "4140 HR HT"
+        assert meta["material"] == "4140 HR HT"
+        assert {"417 LATHE", "413 LATHE", "655 MILL", "519 GRIND"}.issubset(
+            set(meta["work_centers"].split(", "))
+        )
+        assert len(ops) >= 4
+
 
 # ---------------------------------------------------------------------------
 # build_shared_print_record
@@ -447,6 +533,13 @@ class TestBuildSharedPrintRecord:
         rec = build_shared_print_record(f)
         for col in _PRINT_INDEX_COLS:
             assert col in rec, f"Missing column: {col}"
+
+    def test_material_detail_fields_present(self, tmp_path):
+        f = tmp_path / "print.txt"
+        f.write_text(PRINT_TEXT, encoding="utf-8")
+        rec = build_shared_print_record(f)
+        assert "raw_material_text" in rec
+        assert "normalized_material" in rec
 
     def test_file_size_populated(self, tmp_path):
         f = tmp_path / "print.txt"
@@ -1307,6 +1400,15 @@ class TestNewColumnSchema:
                 "drawing_number", "revision", "material", "extraction_confidence")
         for f in core:
             assert f in _JOB_META_COLS
+
+    def test_material_detail_fields_in_metadata_cols(self):
+        for f in ("raw_material_text", "normalized_material"):
+            assert f in _JOB_META_COLS
+            assert f in _PRINT_INDEX_COLS
+
+    def test_work_center_detail_fields_in_router_ops_cols(self):
+        for f in ("work_center_code", "work_center_type"):
+            assert f in _ROUTER_OPS_COLS
 
     def test_job_metadata_csv_has_new_columns(self, tmp_path):
         f = tmp_path / "t.txt"
