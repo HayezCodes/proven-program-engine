@@ -34,6 +34,7 @@ _PROG_JOB_LINK_COLS = [
     "link_confidence", "link_method", "link_reason",
     "material", "material_source", "material_confidence",
     "material_conflict", "needs_review",
+    "candidate_job_count", "candidate_materials", "material_consensus_status",
 ]
 
 _MATERIAL_BACKFILL_COLS = [
@@ -42,6 +43,7 @@ _MATERIAL_BACKFILL_COLS = [
     "verified_material", "material_source", "material_confidence",
     "matched_job_number", "matched_part_number", "matched_drawing_number",
     "link_confidence", "link_method", "link_reason", "needs_review",
+    "candidate_job_count", "candidate_materials", "material_consensus_status",
 ]
 
 _ROUTER_CONTEXT_COLS = [
@@ -299,6 +301,9 @@ def _base_link(program_row: dict) -> dict:
         "material_confidence":       "NONE",
         "material_conflict":         False,
         "needs_review":              False,
+        "candidate_job_count":       0,
+        "candidate_materials":       "",
+        "material_consensus_status": "not_applicable",
     }
 
 
@@ -497,7 +502,12 @@ def _match_program(
     # ------------------------------------------------------------------
     if not router_df.empty and "operation_description" in router_df.columns:
         for tok in tokens:
-            if len(tok) < 5:
+            # Allow 5+ char tokens (original behaviour) and exactly-4-digit
+            # pure-numeric tokens (e.g. machine 417/426 programs like 0582.OP1).
+            # Shorter tokens and 4-char non-numeric tokens are too ambiguous.
+            if len(tok) < 4:
+                continue
+            if len(tok) == 4 and not tok.isdigit():
                 continue
             matched = router_df[
                 router_df["operation_description"].str.contains(
@@ -528,6 +538,103 @@ def _match_program(
                 "material_confidence": conf,
                 "material_conflict":   conflict,
                 "needs_review":        True,
+            })
+            return link
+
+    # ------------------------------------------------------------------
+    # Strategy 6: composite material consensus (MEDIUM confidence)
+    # Fires when multiple router jobs reference this program and enough
+    # candidate materials agree (>= 2 jobs must confirm the same material).
+    # Verifies material only — does NOT assign a specific job number.
+    # ------------------------------------------------------------------
+    if not router_df.empty and "operation_description" in router_df.columns:
+        for tok in tokens:
+            if len(tok) < 4:
+                continue
+            if len(tok) == 4 and not tok.isdigit():
+                continue
+            matched = router_df[
+                router_df["operation_description"].str.contains(
+                    re.escape(tok), case=False, na=False
+                )
+            ]
+            if matched.empty:
+                continue
+            unique_jobs_raw = [
+                str(j) for j in matched["job_number"].dropna().unique()
+                if str(j).strip().lower() not in ("nan", "")
+            ]
+            if len(unique_jobs_raw) < 2:
+                continue  # Strategy 5 already handles the 0- and 1-job cases
+
+            # Collect the first known material per candidate job (one per job,
+            # so count_agree reflects distinct jobs, not router-file duplicates).
+            job_mat: dict[str, str] = {}
+            for jn_raw in unique_jobs_raw:
+                jn_norm = _normalize_id(jn_raw)
+                for jr in job_by_job.get(jn_norm, []):
+                    mat = str(
+                        jr.get("normalized_material", "")
+                        or jr.get("material", "")
+                        or ""
+                    ).strip()
+                    if mat and mat.upper() not in ("UNKNOWN", "NAN", ""):
+                        job_mat[jn_raw] = mat
+                        break  # one material per job
+
+            known_mats   = list(job_mat.values())
+            unique_known = list(dict.fromkeys(known_mats))
+
+            if len(unique_known) == 0:
+                consensus_status = "insufficient_material_data"
+                consensus_mat    = "UNKNOWN"
+                mat_source       = "UNKNOWN"
+                mat_conf         = "NONE"
+                conflict         = False
+                needs_rev        = False
+            elif len(unique_known) == 1 and known_mats.count(unique_known[0]) >= 2:
+                # >= 2 distinct jobs confirm the same material, no conflicts
+                consensus_status = "consensus_material"
+                consensus_mat    = unique_known[0]
+                mat_source       = "ROUTER_CONSENSUS"
+                mat_conf         = "MEDIUM"
+                conflict         = False
+                needs_rev        = False
+            elif len(unique_known) == 1:
+                # Only one job has a known material; rest are unknown — insufficient
+                consensus_status = "insufficient_material_data"
+                consensus_mat    = "UNKNOWN"
+                mat_source       = "UNKNOWN"
+                mat_conf         = "NONE"
+                conflict         = False
+                needs_rev        = False
+            else:
+                # Multiple distinct known materials across candidate jobs — conflict
+                consensus_status = "conflicting_materials"
+                consensus_mat    = "UNKNOWN"
+                mat_source       = "UNKNOWN"
+                mat_conf         = "NONE"
+                conflict         = True
+                needs_rev        = True
+
+            link = _base_link(program_row)
+            link.update({
+                "link_method":               "composite_material_consensus",
+                "link_confidence":           "MEDIUM",
+                "link_reason":               (
+                    f"filename token '{tok}' found in "
+                    f"{len(unique_jobs_raw)} router jobs; "
+                    f"material consensus: {consensus_status}"
+                ),
+                "matched_job_number":        "MULTIPLE",
+                "material":                  consensus_mat,
+                "material_source":           mat_source,
+                "material_confidence":       mat_conf,
+                "material_conflict":         conflict,
+                "needs_review":              needs_rev,
+                "candidate_job_count":       len(unique_jobs_raw),
+                "candidate_materials":       "|".join(unique_known),
+                "material_consensus_status": consensus_status,
             })
             return link
 
@@ -651,6 +758,10 @@ def build_material_backfill(
                         False if col in ("needs_review",) else ""
                     )
                 )
+        # Correct defaults for new consensus columns (generic heuristic above mis-fills these)
+        cuts_sel["candidate_job_count"]       = 0
+        cuts_sel["candidate_materials"]       = ""
+        cuts_sel["material_consensus_status"] = "not_applicable"
         return cuts_sel[_MATERIAL_BACKFILL_COLS]
 
     link_sel = links_df[[
@@ -659,6 +770,7 @@ def build_material_backfill(
         "link_confidence", "link_method", "link_reason",
         "material", "material_source", "material_confidence",
         "needs_review",
+        "candidate_job_count", "candidate_materials", "material_consensus_status",
     ]].copy()
     link_sel.rename(columns={
         "material":            "verified_material",
@@ -668,21 +780,27 @@ def build_material_backfill(
 
     # Fill NaN for unmatched programs
     str_fill = {
-        "verified_material":       "UNKNOWN",
-        "material_source":         "UNKNOWN",
-        "material_confidence":     "NONE",
-        "link_confidence":         "NONE",
-        "link_method":             "no_match",
-        "link_reason":             "",
-        "matched_job_number":      "",
-        "matched_part_number":     "",
-        "matched_drawing_number":  "",
+        "verified_material":         "UNKNOWN",
+        "material_source":           "UNKNOWN",
+        "material_confidence":       "NONE",
+        "link_confidence":           "NONE",
+        "link_method":               "no_match",
+        "link_reason":               "",
+        "matched_job_number":        "",
+        "matched_part_number":       "",
+        "matched_drawing_number":    "",
+        "candidate_materials":       "",
+        "material_consensus_status": "not_applicable",
     }
     for col, val in str_fill.items():
         if col in merged.columns:
             merged[col] = merged[col].fillna(val)
 
-    merged["needs_review"] = (merged["needs_review"] == True)  # NaN → False, avoids fillna downcast warning
+    merged["needs_review"] = (merged["needs_review"] == True)  # NaN → False
+    if "candidate_job_count" in merged.columns:
+        merged["candidate_job_count"] = (
+            pd.to_numeric(merged["candidate_job_count"], errors="coerce").fillna(0).astype(int)
+        )
 
     return merged[_MATERIAL_BACKFILL_COLS]
 

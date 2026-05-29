@@ -779,3 +779,314 @@ class TestRunJobLinkIntegration:
         assert links.iloc[0]["link_method"] == "exact_drawing_number"
         assert links.iloc[0]["material"] == "316 STAINLESS"
         assert backfill.iloc[0]["verified_material"] == "316 STAINLESS"
+
+
+# ---------------------------------------------------------------------------
+# Phase 6D: 4-digit numeric router token matching
+# ---------------------------------------------------------------------------
+
+class TestRouterMatch4DigitTokens:
+    """
+    Phase 6D: Validate that 4-digit pure-numeric tokens (e.g. 0582, 1025)
+    are now allowed through Strategy 5 while preserving all guards for
+    shorter tokens, non-numeric 4-char tokens, and ambiguous matches.
+    """
+
+    def _job(self, job_number: str, material: str = "4140") -> pd.DataFrame:
+        return _job_meta([{"source_file": f"G:/j_{job_number}.txt",
+                           "job_number": job_number, "material": material}])
+
+    def _ops(self, rows: list[dict]) -> pd.DataFrame:
+        return _router_ops(rows)
+
+    def test_4digit_numeric_single_job_links_via_router(self):
+        """0582.OP1 → token '0582' in router for exactly one job → router_match."""
+        manifest = _manifest([{"program_id": 1, "filename": "0582.OP1",
+                                "source_file": "P:/417/0582.OP1",
+                                "machine_folder": "417,426"}])
+        jobs = self._job("D21635", "1045 HR")
+        ops  = self._ops([{"job_number": "D21635",
+                            "operation_description": "right end program number: 0582.op2"}])
+        df = build_program_job_links(manifest, jobs, _prints([]), ops)
+        assert df.iloc[0]["link_method"] == "router_match"
+        assert df.iloc[0]["link_confidence"] == "LOW"
+        assert df.iloc[0]["matched_job_number"] == "D21635"
+        assert df.iloc[0]["needs_review"] == True
+
+    def test_4digit_numeric_material_populated_from_router_job(self):
+        """Material from the matched job is carried through."""
+        manifest = _manifest([{"program_id": 1, "filename": "1486.OP1",
+                                "source_file": "P:/417/1486.OP1",
+                                "machine_folder": "417,426"}])
+        jobs = self._job("D23022", "316 STAINLESS")
+        ops  = self._ops([{"job_number": "D23022",
+                            "operation_description": "first operation left end program number: 1486.op1"}])
+        df = build_program_job_links(manifest, jobs, _prints([]), ops)
+        assert df.iloc[0]["link_method"] == "router_match"
+        assert df.iloc[0]["material"] == "316 STAINLESS"
+
+    def test_4digit_numeric_multiple_jobs_conflicting_materials(self):
+        """Token '1025' in router for two jobs with different materials.
+        Phase 6E Strategy 6 now catches this as composite_material_consensus
+        with conflicting_materials — no material assigned, needs_review=True."""
+        manifest = _manifest([{"program_id": 1, "filename": "1025.OP1",
+                                "source_file": "P:/417/1025.OP1",
+                                "machine_folder": "417,426"}])
+        jobs = _job_meta([
+            {"job_number": "D20144", "material": "4140"},
+            {"job_number": "D20993", "material": "316"},
+        ])
+        ops = self._ops([
+            {"job_number": "D20144", "operation_description": "second op program 1025.op2"},
+            {"job_number": "D20993", "operation_description": "program number: 1025.op1"},
+        ])
+        df = build_program_job_links(manifest, jobs, _prints([]), ops)
+        row = df.iloc[0]
+        assert row["link_method"] == "composite_material_consensus"
+        assert row["material"] == "UNKNOWN"
+        assert row["material_consensus_status"] == "conflicting_materials"
+        assert row["needs_review"] == True
+
+    def test_3digit_token_still_not_matched_by_router(self):
+        """3-char token '118' must not trigger router_match even with a single-job hit."""
+        manifest = _manifest([{"program_id": 1, "filename": "118.NC",
+                                "source_file": "P:/417/118.NC",
+                                "machine_folder": "417,426"}])
+        jobs = self._job("D24076")
+        ops  = self._ops([{"job_number": "D24076",
+                            "operation_description": "program 118 left end"}])
+        df = build_program_job_links(manifest, jobs, _prints([]), ops)
+        assert df.iloc[0]["link_method"] != "router_match"
+
+    def test_4char_nonnumeric_token_not_matched_by_router(self):
+        """4-char non-numeric token 'ABCD' must not pass the numeric guard."""
+        manifest = _manifest([{"program_id": 1, "filename": "ABCD.NC"}])
+        jobs = self._job("D99999")
+        ops  = self._ops([{"job_number": "D99999",
+                            "operation_description": "ABCD sequence operation"}])
+        df = build_program_job_links(manifest, jobs, _prints([]), ops)
+        assert df.iloc[0]["link_method"] != "router_match"
+
+    def test_5digit_existing_behaviour_unchanged(self):
+        """5-digit tokens continue to work exactly as before."""
+        manifest = _manifest([{"program_id": 1, "filename": "10007.NC"}])
+        jobs = self._job("D20182", "4140 HR HT")
+        ops  = self._ops([{"job_number": "D20182",
+                            "operation_description": "left end program number: 10007"}])
+        df = build_program_job_links(manifest, jobs, _prints([]), ops)
+        assert df.iloc[0]["link_method"] == "router_match"
+        assert df.iloc[0]["matched_job_number"] == "D20182"
+
+    def test_leading_zero_4digit_token_links(self):
+        """Leading-zero 4-digit stem like 0582 produces token '0582' which is all digits."""
+        manifest = _manifest([{"program_id": 1, "filename": "0118.OP1",
+                                "source_file": "P:/417/0118.OP1",
+                                "machine_folder": "417,426"}])
+        jobs = self._job("D24076")
+        ops  = self._ops([{"job_number": "D24076",
+                            "operation_description": "program number 0118.op1"}])
+        df = build_program_job_links(manifest, jobs, _prints([]), ops)
+        assert df.iloc[0]["link_method"] == "router_match"
+        assert df.iloc[0]["matched_job_number"] == "D24076"
+
+
+# ---------------------------------------------------------------------------
+# Phase 6E: Composite material consensus strategy
+# ---------------------------------------------------------------------------
+
+class TestCompositeMaterialConsensus:
+    """
+    Phase 6E: Validates Strategy 6 — composite_material_consensus.
+    Multiple router jobs reference the same program; material is verified
+    by consensus without assigning a specific job number.
+    """
+
+    def _multi_job_ops(self, stem: str, jobs: list[str]) -> pd.DataFrame:
+        return _router_ops([
+            {"job_number": jn,
+             "operation_description": f"left end program number: {stem}"}
+            for jn in jobs
+        ])
+
+    def test_multiple_jobs_same_material_assigns_consensus(self):
+        """3 jobs all specify '4140 HR HT' → consensus_material, material assigned."""
+        manifest = _manifest([{"program_id": 1, "filename": "10007001.EIA",
+                                "source_file": "P:/421/10007001.EIA",
+                                "machine_folder": "421, 423, 424"}])
+        jobs = _job_meta([
+            {"job_number": "D20182", "material": "4140 HR HT"},
+            {"job_number": "D20464", "material": "4140 HR HT"},
+            {"job_number": "D21690", "material": "4140 HR HT"},
+        ])
+        ops = self._multi_job_ops("10007001", ["D20182", "D20464", "D21690"])
+        df = build_program_job_links(manifest, jobs, _prints([]), ops)
+        row = df.iloc[0]
+        assert row["link_method"] == "composite_material_consensus"
+        assert row["link_confidence"] == "MEDIUM"
+        assert row["material"] == "4140 HR HT"
+        assert row["material_source"] == "ROUTER_CONSENSUS"
+        assert row["material_confidence"] == "MEDIUM"
+        assert row["material_consensus_status"] == "consensus_material"
+        assert row["needs_review"] == False
+        assert row["material_conflict"] == False
+
+    def test_multiple_jobs_conflicting_materials_no_assignment(self):
+        """Jobs disagree on material → conflicting_materials, material stays UNKNOWN."""
+        manifest = _manifest([{"program_id": 1, "filename": "10033001.EIA",
+                                "source_file": "P:/421/10033001.EIA",
+                                "machine_folder": "421, 423, 424"}])
+        jobs = _job_meta([
+            {"job_number": "D20372", "material": "4140 HR HT"},
+            {"job_number": "D20509", "material": "316 STAINLESS"},
+        ])
+        ops = self._multi_job_ops("10033001", ["D20372", "D20509"])
+        df = build_program_job_links(manifest, jobs, _prints([]), ops)
+        row = df.iloc[0]
+        assert row["link_method"] == "composite_material_consensus"
+        assert row["material"] == "UNKNOWN"
+        assert row["material_source"] == "UNKNOWN"
+        assert row["material_conflict"] == True
+        assert row["needs_review"] == True
+        assert row["material_consensus_status"] == "conflicting_materials"
+
+    def test_multiple_jobs_all_unknown_material_stays_unknown(self):
+        """All candidate jobs have no material → insufficient_material_data."""
+        manifest = _manifest([{"program_id": 1, "filename": "10064001.EIA",
+                                "source_file": "P:/421/10064001.EIA",
+                                "machine_folder": "421, 423, 424"}])
+        jobs = _job_meta([
+            {"job_number": "D20067", "material": ""},
+            {"job_number": "D20629", "material": ""},
+            {"job_number": "D20899", "material": ""},
+        ])
+        ops = self._multi_job_ops("10064001", ["D20067", "D20629", "D20899"])
+        df = build_program_job_links(manifest, jobs, _prints([]), ops)
+        row = df.iloc[0]
+        assert row["link_method"] == "composite_material_consensus"
+        assert row["material"] == "UNKNOWN"
+        assert row["material_confidence"] == "NONE"
+        assert row["material_consensus_status"] == "insufficient_material_data"
+        assert row["needs_review"] == False
+
+    def test_one_known_material_plus_unknowns_stays_unknown(self):
+        """Only 1 of 3 jobs has a known material → rule requires >= 2; stays UNKNOWN."""
+        manifest = _manifest([{"program_id": 1, "filename": "10071001.EIA",
+                                "source_file": "P:/421/10071001.EIA",
+                                "machine_folder": "421, 423, 424"}])
+        jobs = _job_meta([
+            {"job_number": "D21126", "material": "4140 HR HT"},
+            {"job_number": "D24415", "material": ""},
+            {"job_number": "D24500", "material": ""},
+        ])
+        ops = self._multi_job_ops("10071001", ["D21126", "D24415", "D24500"])
+        df = build_program_job_links(manifest, jobs, _prints([]), ops)
+        row = df.iloc[0]
+        assert row["material_consensus_status"] == "insufficient_material_data"
+        assert row["material"] == "UNKNOWN"
+
+    def test_two_known_same_material_plus_unknowns_assigns_consensus(self):
+        """2 of 4 jobs agree on material, 2 are unknown → >= 2 threshold met → consensus."""
+        manifest = _manifest([{"program_id": 1, "filename": "10007002.EIA",
+                                "source_file": "P:/421/10007002.EIA",
+                                "machine_folder": "421, 423, 424"}])
+        jobs = _job_meta([
+            {"job_number": "D20182", "material": "4140 HR HT"},
+            {"job_number": "D20464", "material": "4140 HR HT"},
+            {"job_number": "D21690", "material": ""},
+            {"job_number": "D23073", "material": ""},
+        ])
+        ops = self._multi_job_ops("10007002", ["D20182", "D20464", "D21690", "D23073"])
+        df = build_program_job_links(manifest, jobs, _prints([]), ops)
+        row = df.iloc[0]
+        assert row["material_consensus_status"] == "consensus_material"
+        assert row["material"] == "4140 HR HT"
+        assert row["material_confidence"] == "MEDIUM"
+
+    def test_matched_job_number_is_not_single_job(self):
+        """matched_job_number must never hold a single specific job for a consensus match."""
+        manifest = _manifest([{"program_id": 1, "filename": "10033002.EIA",
+                                "source_file": "P:/421/10033002.EIA",
+                                "machine_folder": "421, 423, 424"}])
+        jobs = _job_meta([
+            {"job_number": "D20372", "material": "316 STAINLESS"},
+            {"job_number": "D20509", "material": "316 STAINLESS"},
+        ])
+        ops = self._multi_job_ops("10033002", ["D20372", "D20509"])
+        df = build_program_job_links(manifest, jobs, _prints([]), ops)
+        row = df.iloc[0]
+        assert row["link_method"] == "composite_material_consensus"
+        # Job number must not be a single specific D-number
+        assert row["matched_job_number"] not in ("D20372", "D20509")
+        assert row["matched_job_number"] == "MULTIPLE"
+
+    def test_material_source_is_router_consensus(self):
+        """material_source must be ROUTER_CONSENSUS for a successful consensus."""
+        manifest = _manifest([{"program_id": 1, "filename": "10264001.EIA"}])
+        jobs = _job_meta([
+            {"job_number": "D21001", "material": "17-4 PH"},
+            {"job_number": "D21500", "material": "17-4 PH"},
+        ])
+        ops = self._multi_job_ops("10264001", ["D21001", "D21500"])
+        df = build_program_job_links(manifest, jobs, _prints([]), ops)
+        row = df.iloc[0]
+        assert row["material_source"] == "ROUTER_CONSENSUS"
+
+    def test_material_confidence_is_medium_for_consensus(self):
+        """Consensus material must be MEDIUM confidence, not HIGH."""
+        manifest = _manifest([{"program_id": 1, "filename": "10303001.EIA"}])
+        jobs = _job_meta([
+            {"job_number": "D22000", "material": "1144 CF"},
+            {"job_number": "D22500", "material": "1144 CF"},
+        ])
+        ops = self._multi_job_ops("10303001", ["D22000", "D22500"])
+        df = build_program_job_links(manifest, jobs, _prints([]), ops)
+        row = df.iloc[0]
+        assert row["material_confidence"] == "MEDIUM"
+        assert row["link_confidence"] == "MEDIUM"
+
+    def test_new_columns_present_in_all_link_records(self):
+        """candidate_job_count, candidate_materials, material_consensus_status
+        must appear for every program, including non-consensus ones."""
+        manifest = _manifest([
+            {"program_id": 1, "filename": "EM0001.NC"},
+            {"program_id": 2, "filename": "10007001.EIA"},
+        ])
+        jobs = _job_meta([
+            {"drawing_number": "EM0001", "material": "4140"},
+            {"job_number": "D20182", "material": "316"},
+            {"job_number": "D20464", "material": "316"},
+        ])
+        ops = _router_ops([
+            {"job_number": "D20182",
+             "operation_description": "program number: 10007001"},
+            {"job_number": "D20464",
+             "operation_description": "program number: 10007001"},
+        ])
+        df = build_program_job_links(manifest, jobs, _prints([]), ops)
+        for col in ("candidate_job_count", "candidate_materials", "material_consensus_status"):
+            assert col in df.columns, f"Missing column: {col}"
+        em_row   = df[df["filename"] == "EM0001.NC"].iloc[0]
+        comp_row = df[df["filename"] == "10007001.EIA"].iloc[0]
+        assert em_row["material_consensus_status"]   == "not_applicable"
+        assert comp_row["material_consensus_status"] == "consensus_material"
+        assert comp_row["candidate_job_count"]       == 2
+
+    def test_new_columns_present_in_material_backfill(self):
+        """The three new columns must propagate through material_backfill."""
+        manifest = _manifest([{"program_id": 1, "filename": "10007001.EIA",
+                                "source_file": "P:/421/10007001.EIA",
+                                "machine_folder": "421, 423, 424"}])
+        jobs = _job_meta([
+            {"job_number": "D20182", "material": "4140 HR HT"},
+            {"job_number": "D20464", "material": "4140 HR HT"},
+        ])
+        ops  = self._multi_job_ops("10007001", ["D20182", "D20464"])
+        cuts = _cuts([{"source_file": "P:/421/10007001.EIA",
+                       "machine_folder": "421, 423, 424"}])
+        links_df = build_program_job_links(manifest, jobs, _prints([]), ops)
+        bf_df    = build_material_backfill(cuts, links_df)
+        for col in ("candidate_job_count", "candidate_materials", "material_consensus_status"):
+            assert col in bf_df.columns, f"Missing backfill column: {col}"
+        row = bf_df.iloc[0]
+        assert row["material_consensus_status"] == "consensus_material"
+        assert row["candidate_job_count"] == 2
