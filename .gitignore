@@ -19,8 +19,9 @@ logs/
 *.db
 *.sqlite
 
-# Excel workbook (shop data — do not commit without explicit approval)
+# Excel workbooks (shop data — do not commit without explicit approval)
 *.xlsx
+*.xlsm
 *.xls
 
 # OS
