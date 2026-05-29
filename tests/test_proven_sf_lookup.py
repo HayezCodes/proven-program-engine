@@ -116,6 +116,15 @@ class TestSchema:
         result = build_sf_lookup(df)
         assert "source_file" not in result.columns
 
+    def test_blank_and_nan_modes_display_unknown(self):
+        rows = [
+            _sf_row(s_mode="", f_mode=None),
+            _sf_row(s_mode=float("nan"), f_mode="nan"),
+        ]
+        result = build_sf_lookup(_db(rows))
+        assert set(result["s_mode"]) == {"UNKNOWN"}
+        assert set(result["f_mode"]) == {"UNKNOWN"}
+
 
 # ---------------------------------------------------------------------------
 # S and F range calculation

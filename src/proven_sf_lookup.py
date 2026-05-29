@@ -94,10 +94,15 @@ def _best_confidence(series: pd.Series) -> str:
     return "LOW"
 
 
-def _norm_mode(val: str) -> str:
-    """Normalise empty / UNKNOWN mode strings to empty string."""
+def _norm_mode(val) -> str:
+    """Normalise empty / UNKNOWN / NaN mode strings for display."""
+    try:
+        if pd.isna(val):
+            return "UNKNOWN"
+    except (TypeError, ValueError):
+        pass
     v = str(val or "").strip().upper()
-    return "" if v in ("", "UNKNOWN") else v
+    return "UNKNOWN" if v in ("", "UNKNOWN", "NAN", "NONE") else v
 
 
 # ---------------------------------------------------------------------------
