@@ -786,18 +786,20 @@ class TestRunBuildSfDatabase:
         self._write_csv(exports / "material_candidates_20260101_000001.csv", _mat_cands())
         self._write_csv(exports / "router_program_context_20260101_000001.csv", _router_ctx())
 
-        db_path, summ_path, prog_path = run_build_sf_database(exports_dir=exports)
+        db_path, summ_path, prog_path, lookup_path = run_build_sf_database(exports_dir=exports)
         assert db_path.exists()
         assert summ_path.exists()
         assert prog_path.exists()
+        assert lookup_path.exists()
 
     def test_run_with_no_cuts_creates_empty_outputs(self, tmp_path):
         exports = tmp_path / "empty_exports"
         exports.mkdir()
-        db_path, summ_path, prog_path = run_build_sf_database(exports_dir=exports)
+        db_path, summ_path, prog_path, lookup_path = run_build_sf_database(exports_dir=exports)
         assert db_path.exists()
         assert summ_path.exists()
         assert prog_path.exists()
+        assert lookup_path.exists()
 
     def test_end_to_end_material_in_database(self, tmp_path):
         exports = tmp_path / "exports"
@@ -805,7 +807,7 @@ class TestRunBuildSfDatabase:
         self._write_csv(exports / "cuts_20260101_000001.csv", _cuts())
         self._write_csv(exports / "program_job_links_20260101_000001.csv", _links())
 
-        db_path, _, prog_path = run_build_sf_database(exports_dir=exports)
+        db_path, _, prog_path, _ = run_build_sf_database(exports_dir=exports)
         db = pd.read_csv(db_path)
         assert db.iloc[0]["verified_material"] == "316 STAINLESS"
         assert db.iloc[0]["material_source"] == "ROUTER"

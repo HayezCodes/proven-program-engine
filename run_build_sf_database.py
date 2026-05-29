@@ -43,7 +43,7 @@ def main() -> int:
                         help="Explicit router_program_context_*.csv path")
     args = parser.parse_args()
 
-    db_path, summ_path, prog_path = run_build_sf_database(
+    db_path, summ_path, prog_path, lookup_path = run_build_sf_database(
         exports_dir=args.exports_dir,
         cuts_path=args.cuts,
         links_path=args.links,
@@ -54,9 +54,10 @@ def main() -> int:
     )
 
     print("\nExports written:")
-    print(f"  S/F database : {db_path}")
-    print(f"  S/F summary  : {summ_path}")
+    print(f"  S/F database    : {db_path}")
+    print(f"  S/F summary     : {summ_path}")
     print(f"  Programmer view : {prog_path}")
+    print(f"  S/F lookup      : {lookup_path}")
     return 0
 
 

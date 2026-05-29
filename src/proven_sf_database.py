@@ -29,6 +29,7 @@ import pandas as pd
 from .safety import assert_safe_write
 from .utils import get_logger
 from .dashboard.data_access.tool_identity import resolve_tool_identity_df
+from .proven_sf_lookup import build_sf_lookup, export_sf_lookup
 
 logger = get_logger(__name__)
 
@@ -703,10 +704,12 @@ def run_build_sf_database(
                                  mat_cands_df, router_df)
     sf_summ = build_sf_summary(sf_db)
     programmer_view = build_programmer_view(sf_db)
+    sf_lookup = build_sf_lookup(sf_db)
 
-    db_path   = export_sf_database(sf_db,   exports_dir, timestamp)
-    summ_path = export_sf_summary(sf_summ,  exports_dir, timestamp)
-    prog_path = export_programmer_view(programmer_view, exports_dir, timestamp)
+    db_path    = export_sf_database(sf_db,   exports_dir, timestamp)
+    summ_path  = export_sf_summary(sf_summ,  exports_dir, timestamp)
+    prog_path  = export_programmer_view(programmer_view, exports_dir, timestamp)
+    lookup_path = export_sf_lookup(sf_lookup, exports_dir, timestamp)
 
     # Coverage log
     if not sf_db.empty:
@@ -722,5 +725,6 @@ def run_build_sf_database(
             f"Needs review: {needs_rev}"
         )
 
+    logger.info(f"Lookup groups  : {len(sf_lookup)}")
     logger.info("=== SF database build complete ===")
-    return db_path, summ_path, prog_path
+    return db_path, summ_path, prog_path, lookup_path

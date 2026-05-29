@@ -82,6 +82,12 @@ def load_latest_proven_sf_programmer_view(exports_dir: Path = _EXPORTS_DIR) -> O
     return _load_csv(path)
 
 
+def load_latest_proven_sf_lookup(exports_dir: Path = _EXPORTS_DIR) -> Optional[pd.DataFrame]:
+    """Load the most recent app-facing proven S/F lookup table."""
+    path = _find_latest(exports_dir, "proven_sf_lookup_*.csv")
+    return _load_csv(path)
+
+
 def get_export_status(exports_dir: Path = _EXPORTS_DIR) -> dict:
     """Return availability metadata for each export type."""
     patterns = {
